@@ -35,7 +35,7 @@
         },
         "minimum_salary": {"type": ["number", "integer"]},
         "experience_level": {"type": "string"},
-        "result_limit_per_source": {"type": "integer", "minimum": 1, "maximum": 100},
+        "result_limit_per_source": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 250},
         "sources": {
           "type": "array",
           "items": {"type": "string", "enum": ["linkedin", "indeed", "glassdoor", "handshake", "manual"]}
@@ -45,8 +45,11 @@
           "items": {"type": "string", "enum": ["linkedin", "indeed", "glassdoor", "handshake", "manual"]}
         },
         "collectors_enabled": {"type": "boolean"},
-        "max_jobs_per_source": {"type": "integer", "minimum": 1, "maximum": 100},
-        "max_jobs_per_board": {"type": "integer", "minimum": 1, "maximum": 100},
+        "max_jobs_per_source": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 250},
+        "max_jobs_per_board": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 250},
+        "max_pages_per_source": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+        "max_queries_per_title_location_pair": {"type": "integer", "minimum": 1, "maximum": 10, "default": 4},
+        "early_stop_when_no_new_results": {"type": "boolean", "default": true},
         "manual_jobs": {
           "type": "array",
           "items": {"type": "object", "additionalProperties": true}

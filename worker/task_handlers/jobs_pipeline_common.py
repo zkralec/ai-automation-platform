@@ -13,6 +13,12 @@ DEFAULT_JOB_BOARDS = ("linkedin", "indeed", "glassdoor", "handshake")
 DEFAULT_QUERY = "software engineer"
 DEFAULT_LOCATION = "United States"
 MAX_RESUME_CHARS_FOR_LLM = 16_000
+DEFAULT_RESULT_LIMIT_PER_SOURCE = 250
+MAX_RESULT_LIMIT_PER_SOURCE = 1000
+DEFAULT_MAX_PAGES_PER_SOURCE = 5
+MAX_MAX_PAGES_PER_SOURCE = 20
+DEFAULT_MAX_QUERIES_PER_TITLE_LOCATION_PAIR = 4
+MAX_MAX_QUERIES_PER_TITLE_LOCATION_PAIR = 10
 
 
 def utc_iso() -> str:
@@ -57,6 +63,14 @@ def _as_bool(value: Any) -> bool | None:
         if low in {"false", "no", "none", "0"}:
             return False
     return None
+
+
+def _as_bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
 
 
 def _as_text_list(value: Any) -> list[str]:
@@ -183,16 +197,33 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
     if not experience_level and experience_levels:
         experience_level = experience_levels[0]
 
-    try:
-        max_jobs = int(
-            request.get("result_limit_per_source")
-            or request.get("max_jobs_per_source")
-            or request.get("max_jobs_per_board")
-            or 25
-        )
-    except (TypeError, ValueError):
-        max_jobs = 25
-    max_jobs = max(1, min(max_jobs, 100))
+    max_jobs = _as_bounded_int(
+        request.get("result_limit_per_source")
+        or request.get("max_jobs_per_source")
+        or request.get("max_jobs_per_board")
+        or DEFAULT_RESULT_LIMIT_PER_SOURCE,
+        default=DEFAULT_RESULT_LIMIT_PER_SOURCE,
+        minimum=1,
+        maximum=MAX_RESULT_LIMIT_PER_SOURCE,
+    )
+
+    max_pages_per_source = _as_bounded_int(
+        request.get("max_pages_per_source") or DEFAULT_MAX_PAGES_PER_SOURCE,
+        default=DEFAULT_MAX_PAGES_PER_SOURCE,
+        minimum=1,
+        maximum=MAX_MAX_PAGES_PER_SOURCE,
+    )
+
+    max_queries_per_title_location_pair = _as_bounded_int(
+        request.get("max_queries_per_title_location_pair") or DEFAULT_MAX_QUERIES_PER_TITLE_LOCATION_PAIR,
+        default=DEFAULT_MAX_QUERIES_PER_TITLE_LOCATION_PAIR,
+        minimum=1,
+        maximum=MAX_MAX_QUERIES_PER_TITLE_LOCATION_PAIR,
+    )
+
+    early_stop_when_no_new_results = _as_bool(request.get("early_stop_when_no_new_results"))
+    if early_stop_when_no_new_results is None:
+        early_stop_when_no_new_results = True
 
     requested_sources = [item.strip().lower() for item in _as_text_list(request.get("sources"))]
     if not requested_sources:
@@ -265,10 +296,14 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
         "minimum_salary": minimum_salary,
         "experience_level": experience_level,
         "result_limit_per_source": max_jobs,
+        "max_pages_per_source": max_pages_per_source,
+        "max_queries_per_title_location_pair": max_queries_per_title_location_pair,
+        "early_stop_when_no_new_results": bool(early_stop_when_no_new_results),
         "enabled_sources": list(sources),
         "collectors_enabled": collectors_enabled,
         "sources": sources,
         "max_jobs_per_source": max_jobs,
+        "max_jobs_per_board": max_jobs,
         "manual_jobs": request.get("manual_jobs") if isinstance(request.get("manual_jobs"), list) else [],
         "board_url_overrides": request.get("board_url_overrides") if isinstance(request.get("board_url_overrides"), dict) else {},
         "profile_mode": profile_mode,

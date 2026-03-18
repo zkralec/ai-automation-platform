@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
 from integrations.scrape_common import (
     absolute_url,
@@ -162,17 +162,43 @@ def _extract_work_mode(text: str) -> str | None:
     return None
 
 
-def _build_board_search_url(board: str, *, query: str, location: str) -> str:
+def _replace_query_params(url: str, params: dict[str, str]) -> str:
+    parts = urlsplit(url)
+    query_items = dict(parse_qsl(parts.query, keep_blank_values=True))
+    for key, value in params.items():
+        query_items[key] = value
+    return urlunsplit(parts._replace(query=urlencode(query_items, doseq=True)))
+
+
+def _page_url_for_board(board: str, *, search_url: str, page_index: int) -> str:
+    if page_index <= 0:
+        return search_url
+    if board == "linkedin":
+        return _replace_query_params(search_url, {"start": str(page_index * 25)})
+    if board == "indeed":
+        return _replace_query_params(search_url, {"start": str(page_index * 10)})
+    if board == "glassdoor":
+        return _replace_query_params(search_url, {"p": str(page_index + 1)})
+    if board == "handshake":
+        return _replace_query_params(search_url, {"page": str(page_index + 1)})
+    return search_url
+
+
+def _build_board_search_url(board: str, *, query: str, location: str, page_index: int = 0) -> str:
     q = quote_plus(query or "")
     loc = quote_plus(location or "")
     if board == "linkedin":
-        return f"https://www.linkedin.com/jobs/search/?keywords={q}&location={loc}"
+        search_url = f"https://www.linkedin.com/jobs/search/?keywords={q}&location={loc}"
+        return _page_url_for_board(board, search_url=search_url, page_index=page_index)
     if board == "indeed":
-        return f"https://www.indeed.com/jobs?q={q}&l={loc}"
+        search_url = f"https://www.indeed.com/jobs?q={q}&l={loc}"
+        return _page_url_for_board(board, search_url=search_url, page_index=page_index)
     if board == "glassdoor":
-        return f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}"
+        search_url = f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}"
+        return _page_url_for_board(board, search_url=search_url, page_index=page_index)
     if board == "handshake":
-        return f"https://joinhandshake.com/students/jobs/search?query={q}"
+        search_url = f"https://joinhandshake.com/students/jobs/search?query={q}"
+        return _page_url_for_board(board, search_url=search_url, page_index=page_index)
     raise ValueError(f"Unsupported board '{board}'")
 
 
@@ -196,34 +222,17 @@ def _dedupe_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
-def collect_jobs_from_board(
-    board: str,
-    *,
-    query: str,
-    location: str,
-    max_jobs: int = 25,
-    url_override: str | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    board_key = board.strip().lower()
-    if board_key not in SUPPORTED_JOB_BOARDS:
-        return [], [f"{board_key}: unsupported_board"]
-
-    search_url = (url_override or "").strip() or _build_board_search_url(
-        board_key,
-        query=query,
-        location=location,
+def _job_key(job: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(job.get("source") or "").strip().lower(),
+        str(job.get("url") or "").strip(),
+        str(job.get("title") or "").strip().lower(),
     )
-    base_url = _BOARD_BASE_URLS[board_key]
-    warnings: list[str] = []
 
-    try:
-        html_text = fetch_html(search_url)
-    except Exception as exc:
-        return [], [f"{board_key}: fetch_failed url={search_url} error={type(exc).__name__}: {exc}"]
 
+def _extract_jobs_from_html(board_key: str, *, html_text: str, base_url: str, search_url: str, location: str) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
     scraped_at = now_utc_iso()
-    max_items = max(1, int(max_jobs))
     for match in _ANCHOR_RE.finditer(html_text):
         raw_title = _strip_html(match.group("title") or "")
         if not raw_title or len(raw_title) < 4:
@@ -244,32 +253,115 @@ def collect_jobs_from_board(
         clearance_required, clearance_type = _extract_clearance((raw_title + " " + snippet).lower())
         work_mode = _extract_work_mode((raw_title + " " + snippet).lower())
 
-        job = {
-            "source": board_key,
-            "title": raw_title,
-            "company": _extract_company(snippet),
-            "location": _extract_location(snippet) or location or None,
-            "url": url,
-            "salary_min": salary_min,
-            "salary_max": salary_max,
-            "salary_currency": "USD" if salary_min is not None or salary_max is not None else None,
-            "experience_level": experience_level,
-            "clearance_required": clearance_required,
-            "clearance_type": clearance_type,
-            "work_mode": work_mode,
-            "posted_at": None,
-            "scraped_at": scraped_at,
-            "description_snippet": snippet[:500] if snippet else None,
-            "raw": {"search_url": search_url},
+        jobs.append(
+            {
+                "source": board_key,
+                "title": raw_title,
+                "company": _extract_company(snippet),
+                "location": _extract_location(snippet) or location or None,
+                "url": url,
+                "salary_min": salary_min,
+                "salary_max": salary_max,
+                "salary_currency": "USD" if salary_min is not None or salary_max is not None else None,
+                "experience_level": experience_level,
+                "clearance_required": clearance_required,
+                "clearance_type": clearance_type,
+                "work_mode": work_mode,
+                "posted_at": None,
+                "scraped_at": scraped_at,
+                "description_snippet": snippet[:500] if snippet else None,
+                "raw": {"search_url": search_url},
+            }
+        )
+    return jobs
+
+
+def collect_jobs_from_board(
+    board: str,
+    *,
+    query: str,
+    location: str,
+    max_jobs: int = 25,
+    max_pages: int = 1,
+    early_stop_when_no_new_results: bool = True,
+    url_override: str | None = None,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    board_key = board.strip().lower()
+    if board_key not in SUPPORTED_JOB_BOARDS:
+        return [], [f"{board_key}: unsupported_board"], {
+            "discovered_raw_count": 0,
+            "pages_fetched": 0,
+            "pages_with_results": 0,
+            "stop_reason": "unsupported_board",
         }
-        jobs.append(job)
+
+    base_url = _BOARD_BASE_URLS[board_key]
+    base_search_url = (str(url_override or "").strip() or _build_board_search_url(board_key, query=query, location=location))
+    warnings: list[str] = []
+    jobs: list[dict[str, Any]] = []
+    seen_unique: set[tuple[str, str, str]] = set()
+    max_items = max(1, int(max_jobs))
+    max_page_count = max(1, int(max_pages))
+    pages_fetched = 0
+    pages_with_results = 0
+    discovered_raw_count = 0
+    stop_reason = "max_pages_reached"
+
+    for page_index in range(max_page_count):
+        search_url = _page_url_for_board(
+            board_key,
+            search_url=base_search_url,
+            page_index=page_index,
+        )
+        pages_fetched += 1
+        try:
+            html_text = fetch_html(search_url)
+        except Exception as exc:
+            return jobs, [f"{board_key}: fetch_failed url={search_url} error={type(exc).__name__}: {exc}"], {
+                "discovered_raw_count": discovered_raw_count,
+                "pages_fetched": pages_fetched,
+                "pages_with_results": pages_with_results,
+                "stop_reason": "fetch_failed",
+            }
+
+        page_jobs = _extract_jobs_from_html(
+            board_key,
+            html_text=html_text,
+            base_url=base_url,
+            search_url=search_url,
+            location=location,
+        )
+        discovered_raw_count += len(page_jobs)
+        if page_jobs:
+            pages_with_results += 1
+        jobs.extend(page_jobs)
+
+        new_unique = 0
+        for row in page_jobs:
+            key = _job_key(row)
+            if key in seen_unique:
+                continue
+            seen_unique.add(key)
+            new_unique += 1
+
         if len(jobs) >= max_items:
+            stop_reason = "max_jobs_reached"
+            jobs = jobs[:max_items]
+            break
+        if early_stop_when_no_new_results and new_unique == 0:
+            stop_reason = "no_new_results"
             break
 
     if not jobs:
         warnings.append(f"{board_key}: no_jobs_found")
+        stop_reason = "no_jobs_found"
 
-    return _dedupe_jobs(jobs), warnings
+    return jobs, warnings, {
+        "discovered_raw_count": discovered_raw_count,
+        "pages_fetched": pages_fetched,
+        "pages_with_results": pages_with_results,
+        "stop_reason": stop_reason,
+    }
 
 
 def collect_jobs_from_boards(
@@ -278,6 +370,8 @@ def collect_jobs_from_boards(
     location: str,
     boards: list[str],
     max_jobs_per_board: int = 25,
+    max_pages_per_board: int = 1,
+    early_stop_when_no_new_results: bool = True,
     board_url_overrides: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], list[str]]:
     all_jobs: list[dict[str, Any]] = []
@@ -289,11 +383,13 @@ def collect_jobs_from_boards(
         board = str(raw_board or "").strip().lower()
         if not board:
             continue
-        jobs, board_warnings = collect_jobs_from_board(
+        jobs, board_warnings, _board_meta = collect_jobs_from_board(
             board,
             query=query,
             location=location,
             max_jobs=max_jobs_per_board,
+            max_pages=max_pages_per_board,
+            early_stop_when_no_new_results=early_stop_when_no_new_results,
             url_override=overrides.get(board),
         )
         counts[board] = len(jobs)

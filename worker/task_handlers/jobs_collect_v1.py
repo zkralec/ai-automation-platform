@@ -26,6 +26,10 @@ MANUAL_SUPPORTED_FIELDS = {
     "minimum_salary": True,
     "experience_level": True,
     "result_limit_per_source": True,
+    "max_pages_per_source": True,
+    "max_jobs_per_source": True,
+    "max_queries_per_title_location_pair": True,
+    "early_stop_when_no_new_results": True,
     "enabled_sources": True,
     "input_mode": {
         "titles": "manual_input",
@@ -36,6 +40,10 @@ MANUAL_SUPPORTED_FIELDS = {
         "minimum_salary": "manual_input",
         "experience_level": "manual_input",
         "result_limit_per_source": "manual_input",
+        "max_pages_per_source": "manual_input",
+        "max_jobs_per_source": "manual_input",
+        "max_queries_per_title_location_pair": "manual_input",
+        "early_stop_when_no_new_results": "manual_input",
         "enabled_sources": "pipeline_routing",
     },
     "source_metadata_fields": ["raw"],
@@ -87,6 +95,13 @@ def _normalize_manual_jobs(request: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _meta_count(meta: dict[str, Any], key: str, fallback: int = 0) -> int:
+    try:
+        return int(meta.get(key, fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
 def execute(task: Any, db: Any) -> dict[str, Any]:
     del db
 
@@ -120,6 +135,10 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 "error": None,
                 "meta": {
                     "requested_limit": len(manual_jobs),
+                    "discovered_raw_count": len(manual_jobs),
+                    "kept_after_basic_filter_count": len(manual_jobs),
+                    "dropped_by_basic_filter_count": 0,
+                    "deduped_count": 0,
                     "returned_count": len(manual_jobs),
                 },
             }
@@ -218,6 +237,25 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
     if failed_sources or partial_sources:
         collection_status = "partial_success"
 
+    discovered_raw_count = 0
+    kept_after_basic_filter_count = 0
+    dropped_by_basic_filter_count = 0
+    deduped_count = 0
+    pages_fetched = 0
+    queries_attempted: list[str] = []
+    for source_key, result in source_results.items():
+        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+        jobs_count = int(result.get("jobs_count", 0) or 0)
+        discovered_raw_count += _meta_count(meta, "discovered_raw_count", jobs_count)
+        kept_after_basic_filter_count += _meta_count(meta, "kept_after_basic_filter_count", jobs_count)
+        dropped_by_basic_filter_count += _meta_count(meta, "dropped_by_basic_filter_count", 0)
+        deduped_count += _meta_count(meta, "deduped_count", 0)
+        pages_fetched += _meta_count(meta, "pages_fetched", 0)
+        if isinstance(meta.get("queries_attempted"), list):
+            for value in meta.get("queries_attempted") or []:
+                if isinstance(value, str) and value.strip() and value.strip() not in queries_attempted:
+                    queries_attempted.append(value.strip())
+
     artifact = {
         "artifact_type": "jobs.collect.v1",
         "artifact_schema": "jobs_raw.v1",
@@ -237,6 +275,13 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "partial_sources": partial_sources,
         "failed_sources": failed_sources,
         "skipped_sources": skipped_sources,
+        "collection_counts": {
+            "raw_job_count": len(raw_jobs),
+            "discovered_raw_count": discovered_raw_count,
+            "kept_after_basic_filter_count": kept_after_basic_filter_count,
+            "dropped_by_basic_filter_count": dropped_by_basic_filter_count,
+            "deduped_count": deduped_count,
+        },
         "collection_summary": {
             "requested_sources": sources,
             "collectors_enabled": collectors_enabled,
@@ -245,6 +290,12 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "failed_source_count": len(failed_sources),
             "skipped_source_count": len(skipped_sources),
             "raw_job_count": len(raw_jobs),
+            "discovered_raw_count": discovered_raw_count,
+            "kept_after_basic_filter_count": kept_after_basic_filter_count,
+            "dropped_by_basic_filter_count": dropped_by_basic_filter_count,
+            "deduped_count": deduped_count,
+            "pages_fetched": pages_fetched,
+            "queries_attempted": queries_attempted,
         },
         "lineage": payload.get("lineage") if isinstance(payload.get("lineage"), dict) else {},
     }
@@ -272,6 +323,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "artifact_type": "jobs.collect.v1",
         "content_text": (
             f"jobs_collect_v1 collected {len(raw_jobs)} jobs across {len(successful_sources)} successful sources"
+            f" from {discovered_raw_count} discovered candidates"
             f" with {len(failed_sources)} failed sources."
         ),
         "content_json": artifact,

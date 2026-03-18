@@ -55,6 +55,9 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
 
     raw_jobs = upstream_result.get("raw_jobs")
     raw_count = len(raw_jobs) if isinstance(raw_jobs, list) else 0
+    upstream_collection_summary = (
+        upstream_result.get("collection_summary") if isinstance(upstream_result.get("collection_summary"), dict) else {}
+    )
     normalized_jobs, drop_reasons = normalize_jobs(raw_jobs)
 
     normalization_policy = payload.get("normalization_policy") if isinstance(payload.get("normalization_policy"), dict) else {}
@@ -135,6 +138,12 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "normalized_count": normalized_count,
             "deduped_count": deduped_count,
             "duplicates_collapsed": duplicates_collapsed,
+            "discovered_raw_count": int(upstream_collection_summary.get("discovered_raw_count") or raw_count),
+            "kept_after_basic_filter_count": int(
+                upstream_collection_summary.get("kept_after_basic_filter_count") or raw_count
+            ),
+            "dropped_by_basic_filter_count": int(upstream_collection_summary.get("dropped_by_basic_filter_count") or 0),
+            "collection_deduped_count": int(upstream_collection_summary.get("deduped_count") or 0),
         },
         "jobs_normalized_artifact": jobs_normalized_artifact,
         "jobs_deduped_artifact": jobs_deduped_artifact,
@@ -152,6 +161,12 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "duplicates": duplicates_collapsed,
             "group_count": len(duplicate_groups),
             "ambiguous_case_count": len(ambiguous_cases),
+        },
+        "upstream_collection_counts": {
+            "discovered_raw_count": int(upstream_collection_summary.get("discovered_raw_count") or raw_count),
+            "kept_after_basic_filter_count": int(upstream_collection_summary.get("kept_after_basic_filter_count") or raw_count),
+            "dropped_by_basic_filter_count": int(upstream_collection_summary.get("dropped_by_basic_filter_count") or 0),
+            "deduped_count": int(upstream_collection_summary.get("deduped_count") or 0),
         },
         "ambiguous_duplicate_cases": ambiguous_cases,
         "warnings": warnings,

@@ -72,7 +72,10 @@ def test_resolve_request_preserves_structured_collect_inputs() -> None:
             "work_mode_preference": ["remote", "hybrid"],
             "minimum_salary": 150000,
             "experience_level": "entry-level",
-            "result_limit_per_source": 17,
+            "result_limit_per_source": 450,
+            "max_pages_per_source": 7,
+            "max_queries_per_title_location_pair": 6,
+            "early_stop_when_no_new_results": False,
             "enabled_sources": ["linkedin", "indeed", "glassdoor", "handshake"],
             "shortlist_count": 6,
             "shortlist_freshness_preference": "strong-prefer-recent",
@@ -86,7 +89,12 @@ def test_resolve_request_preserves_structured_collect_inputs() -> None:
     assert request["work_mode_preference"] == ["remote", "hybrid"]
     assert request["minimum_salary"] == 150000.0
     assert request["experience_level"] == "entry"
-    assert request["result_limit_per_source"] == 17
+    assert request["result_limit_per_source"] == 450
+    assert request["max_jobs_per_source"] == 450
+    assert request["max_jobs_per_board"] == 450
+    assert request["max_pages_per_source"] == 7
+    assert request["max_queries_per_title_location_pair"] == 6
+    assert request["early_stop_when_no_new_results"] is False
     assert request["sources"] == ["linkedin", "indeed", "glassdoor", "handshake"]
     assert request["enabled_sources"] == ["linkedin", "indeed", "glassdoor", "handshake"]
     assert request["shortlist_max_items"] == 6
@@ -214,6 +222,10 @@ def test_jobs_collect_v1_success_multisource_fixture(monkeypatch, jobs_v2_sample
     assert artifact["collection_status"] == "success"
     assert artifact["partial_success"] is False
     assert len(artifact["raw_jobs"]) == expected_count
+    assert artifact["collection_summary"]["discovered_raw_count"] == expected_count
+    assert artifact["collection_summary"]["kept_after_basic_filter_count"] == expected_count
+    assert artifact["collection_summary"]["dropped_by_basic_filter_count"] == 0
+    assert artifact["collection_summary"]["deduped_count"] == 0
     assert sorted(artifact["successful_sources"]) == ["glassdoor", "handshake", "indeed", "linkedin"]
     assert artifact["failed_sources"] == []
     assert artifact["collector_errors"] == []
@@ -254,4 +266,8 @@ def test_jobs_collect_v1_empty_success_when_sources_return_no_jobs(monkeypatch) 
     assert sorted(artifact["successful_sources"]) == ["indeed", "linkedin"]
     assert artifact["failed_sources"] == []
     assert artifact["collection_summary"]["raw_job_count"] == 0
+    assert artifact["collection_summary"]["discovered_raw_count"] == 0
+    assert artifact["collection_summary"]["kept_after_basic_filter_count"] == 0
+    assert artifact["collection_summary"]["dropped_by_basic_filter_count"] == 0
+    assert artifact["collection_summary"]["deduped_count"] == 0
     assert result["next_tasks"][0]["task_type"] == "jobs_normalize_v1"

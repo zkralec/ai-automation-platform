@@ -27,3 +27,19 @@ def test_notify_v1_accepts_disable_dedupe_flag() -> None:
         },
     )
 
+
+def test_jobs_collect_v1_accepts_breadth_controls() -> None:
+    validate_payload(
+        "jobs_collect_v1",
+        {
+            "request": {
+                "query": "machine learning engineer",
+                "locations": ["Remote", "New York, NY"],
+                "sources": ["linkedin", "indeed"],
+                "result_limit_per_source": 600,
+                "max_pages_per_source": 8,
+                "max_queries_per_title_location_pair": 5,
+                "early_stop_when_no_new_results": False,
+            }
+        },
+    )
