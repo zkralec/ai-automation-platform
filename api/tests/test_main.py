@@ -8,6 +8,7 @@ from datetime import timedelta
 
 sys.path.insert(0, "/app")
 
+import main as main_module
 from fastapi.testclient import TestClient
 from main import (
     app,
@@ -111,6 +112,27 @@ class TestCreateTaskModelValidation:
         assert "gpt-4o-mini" in detail
         assert "gpt-4o" in detail
         assert "gpt-4-turbo" in detail
+
+    def test_create_task_queue_failure_schedules_enqueue_recovery(self, monkeypatch):
+        def fail_enqueue(*_args, **_kwargs):
+            raise ConnectionError("redis unavailable")
+
+        monkeypatch.setattr(main_module.queue, "enqueue", fail_enqueue)
+
+        response = client.post(
+            "/tasks",
+            json={
+                "task_type": "jobs_digest_v1",
+                "payload_json": '{"jobs": []}',
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "queued"
+        assert payload["error"].startswith("QUEUE_ENQUEUE_ERROR[api]:")
+        assert payload["next_run_at"] is not None
+        assert payload["diagnostics"]["is_queue_enqueue_failure"] is True
+        assert payload["diagnostics"]["upstream_service"] == "redis"
 
 
 def _seed_task_and_run(task_id: str, run_id: str) -> None:
@@ -244,6 +266,61 @@ class TestGetTaskResult:
         assert payload["artifact_type"] == "structured_output"
         assert payload["content_text"] is None
         assert payload["content_json"] == {"summary": "ok", "score": 0.9}
+
+    def test_task_and_run_endpoints_surface_debug_diagnostics(self):
+        task_id = str(uuid.uuid4())
+        run_id = str(uuid.uuid4())
+        with SessionLocal() as db:
+            task = Task(
+                id=task_id,
+                created_at=now_utc(),
+                updated_at=now_utc(),
+                status=TaskStatus.failed,
+                task_type="deals_scan_v1",
+                payload_json='{"collectors_enabled": true}',
+                model="gpt-5-mini",
+                error="Connection error.",
+            )
+            run = Run(
+                id=run_id,
+                task_id=task_id,
+                attempt=1,
+                status=RunStatus.failed,
+                started_at=now_utc(),
+                ended_at=now_utc(),
+                error="Connection error.",
+                created_at=now_utc(),
+            )
+            db.add(task)
+            db.add(run)
+            db.flush()
+            db.add(
+                Artifact(
+                    id=str(uuid.uuid4()),
+                    task_id=task_id,
+                    run_id=run_id,
+                    artifact_type="debug.json",
+                    content_json={
+                        "error_type": "APIConnectionError",
+                        "error": "Connection error.",
+                        "retry_scheduled": False,
+                    },
+                    created_at=now_utc(),
+                )
+            )
+            db.commit()
+
+        task_response = client.get(f"/tasks/{task_id}")
+        assert task_response.status_code == 200
+        task_payload = task_response.json()
+        assert task_payload["diagnostics"]["category"] == "upstream_connection_failure"
+        assert task_payload["diagnostics"]["upstream_service"] == "openai"
+
+        runs_response = client.get(f"/tasks/{task_id}/runs")
+        assert runs_response.status_code == 200
+        runs_payload = runs_response.json()
+        assert runs_payload[0]["diagnostics"]["error_type"] == "APIConnectionError"
+        assert runs_payload[0]["diagnostics"]["summary"].startswith("Worker failed while calling the OpenAI API")
 
 
 class TestBudgetBlockHistory:

@@ -6,6 +6,7 @@ import type {
   HealthOut,
   PlannerStatusOut,
   ReadyOut,
+  RuntimeStatusOut,
   StatsToday,
   SystemMetricsOut
 } from "@/lib/api/generated/openapi";
@@ -57,6 +58,10 @@ export async function getReadyStatus(): Promise<ReadyOut> {
 
 export function getHeartbeats(limit = 100): Promise<AgentHeartbeatOut[]> {
   return apiRequest<AgentHeartbeatOut[]>(`/telemetry/heartbeats?limit=${encodeURIComponent(limit)}`);
+}
+
+export function getRuntimeStatus(): Promise<RuntimeStatusOut> {
+  return apiRequest<RuntimeStatusOut>("/telemetry/runtime-status");
 }
 
 export function getStaleHeartbeats(staleAfterSeconds?: number, limit = 100): Promise<AgentHeartbeatOut[]> {

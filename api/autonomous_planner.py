@@ -270,9 +270,20 @@ def _materialize_payload_json(
 def _runtime() -> dict[str, Any]:
     # Lazy import keeps planning functions usable even when the full API runtime
     # dependency set is unavailable (for dry verification scripts).
-    from main import Run, RunStatus, SessionLocal, Task, TaskStatus, choose_model, queue
+    from main import (
+        ENQUEUE_RECOVERY_DELAY_SEC,
+        Run,
+        RunStatus,
+        SessionLocal,
+        Task,
+        TaskStatus,
+        choose_model,
+        queue,
+        schedule_enqueue_recovery,
+    )
 
     return {
+        "ENQUEUE_RECOVERY_DELAY_SEC": ENQUEUE_RECOVERY_DELAY_SEC,
         "Run": Run,
         "RunStatus": RunStatus,
         "SessionLocal": SessionLocal,
@@ -280,6 +291,7 @@ def _runtime() -> dict[str, Any]:
         "TaskStatus": TaskStatus,
         "choose_model": choose_model,
         "queue": queue,
+        "schedule_enqueue_recovery": schedule_enqueue_recovery,
     }
 
 
@@ -734,8 +746,24 @@ def build_planner_decisions(state: dict[str, Any], policy: PlannerPolicy, now: d
 def _enqueue_existing_task(task_id: str) -> dict[str, Any]:
     runtime = _runtime()
     queue = runtime["queue"]
-    queue.enqueue("worker.run_task", task_id)
-    return {"status": "enqueued", "task_id": task_id}
+    schedule_enqueue_recovery = runtime["schedule_enqueue_recovery"]
+    retry_delay_seconds = int(runtime["ENQUEUE_RECOVERY_DELAY_SEC"])
+    try:
+        queue.enqueue("worker.run_task", task_id)
+        return {"status": "enqueued", "task_id": task_id}
+    except Exception as exc:
+        failure = schedule_enqueue_recovery(
+            task_id,
+            source="autonomous_planner",
+            error=exc,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+        return {
+            "status": "enqueue_retry_scheduled",
+            "task_id": task_id,
+            "scheduled_retry_at": failure.get("scheduled_retry_at"),
+            "error": failure.get("error"),
+        }
 
 
 def _create_planner_task(
@@ -756,6 +784,8 @@ def _create_planner_task(
     TaskStatus = runtime["TaskStatus"]
     choose_model = runtime["choose_model"]
     queue = runtime["queue"]
+    schedule_enqueue_recovery = runtime["schedule_enqueue_recovery"]
+    retry_delay_seconds = int(runtime["ENQUEUE_RECOVERY_DELAY_SEC"])
 
     payload_compact = _normalize_payload_json(payload_json)
     cooldown_window = max(int(create_cooldown_seconds or policy.create_task_cooldown_seconds), 60)
@@ -801,12 +831,27 @@ def _create_planner_task(
         db.add(task)
         db.commit()
 
-    queue.enqueue("worker.run_task", task_id)
-    return {
-        "status": "created_and_enqueued",
-        "task_id": task_id,
-        "idempotency_key": idempotency_key,
-    }
+    try:
+        queue.enqueue("worker.run_task", task_id)
+        return {
+            "status": "created_and_enqueued",
+            "task_id": task_id,
+            "idempotency_key": idempotency_key,
+        }
+    except Exception as exc:
+        failure = schedule_enqueue_recovery(
+            task_id,
+            source="autonomous_planner",
+            error=exc,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+        return {
+            "status": "enqueue_retry_scheduled",
+            "task_id": task_id,
+            "idempotency_key": idempotency_key,
+            "scheduled_retry_at": failure.get("scheduled_retry_at"),
+            "error": failure.get("error"),
+        }
 
 
 def execute_planner_decisions(

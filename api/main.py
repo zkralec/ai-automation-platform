@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -93,6 +95,7 @@ DEFAULT_HEARTBEAT_STALE_AFTER_SEC = max(
     int(os.getenv("WATCHDOG_STALE_AFTER_SEC", os.getenv("HEARTBEAT_STALE_AFTER_SEC", "180"))),
     30,
 )
+ENQUEUE_RECOVERY_DELAY_SEC = max(int(os.getenv("ENQUEUE_RECOVERY_DELAY_SEC", "60")), 10)
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -272,6 +275,7 @@ if not FRONTEND_DIST_DIR.exists():
     FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 app.mount("/app/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets", check_dir=False), name="frontend-assets")
 RESULT_ARTIFACT_TYPE = "result.json"
+DEBUG_ARTIFACT_TYPE = "debug.json"
 
 
 def now_utc() -> datetime:
@@ -490,6 +494,198 @@ def _tracked_agent_names_for_telemetry() -> set[str]:
     return tracked
 
 
+def _safe_debug_payload(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _latest_debug_artifacts_by_task_id(db, task_ids: set[str]) -> dict[str, dict[str, Any]]:
+    if not task_ids:
+        return {}
+    rows = (
+        db.query(Artifact)
+        .filter(
+            Artifact.task_id.in_(sorted(task_ids)),
+            Artifact.artifact_type == DEBUG_ARTIFACT_TYPE,
+        )
+        .order_by(Artifact.task_id.asc(), Artifact.created_at.desc(), Artifact.id.desc())
+        .all()
+    )
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.task_id in latest:
+            continue
+        latest[row.task_id] = _safe_debug_payload(row.content_json)
+    return latest
+
+
+def _latest_debug_artifacts_by_run_id(db, run_ids: set[str]) -> dict[str, dict[str, Any]]:
+    if not run_ids:
+        return {}
+    rows = (
+        db.query(Artifact)
+        .filter(
+            Artifact.run_id.in_(sorted(run_ids)),
+            Artifact.artifact_type == DEBUG_ARTIFACT_TYPE,
+        )
+        .order_by(Artifact.run_id.asc(), Artifact.created_at.desc(), Artifact.id.desc())
+        .all()
+    )
+    latest: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.run_id in latest:
+            continue
+        latest[row.run_id] = _safe_debug_payload(row.content_json)
+    return latest
+
+
+def _parse_prefixed_error_type(error_text: str) -> str | None:
+    if not error_text:
+        return None
+    head = error_text.split(":", 1)[0].strip()
+    if not head:
+        return None
+    if head.startswith("QUEUE_ENQUEUE_ERROR["):
+        return "QUEUE_ENQUEUE_ERROR"
+    if head.isupper() or head.endswith("Error"):
+        return head
+    return None
+
+
+def _derive_failure_diagnostics(
+    *,
+    error_text: str | None,
+    debug_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    debug = debug_payload or {}
+    raw_error = str(error_text or debug.get("error") or "").strip()
+    error_type = str(debug.get("error_type") or _parse_prefixed_error_type(raw_error) or "").strip() or None
+    retry_scheduled = bool(debug.get("retry_scheduled"))
+    retry_at = _parse_iso_datetime(debug.get("retry_at"))
+
+    if not raw_error and not error_type:
+        return None
+
+    category = "task_execution_failure"
+    source = "worker"
+    stage = "worker_execute"
+    upstream_service: str | None = None
+    is_browser_disconnect = False
+    is_task_execution_failure = True
+    is_queue_enqueue_failure = False
+    is_scheduler_runtime_failure = False
+    summary = raw_error or "Task failure recorded."
+
+    if raw_error.startswith("QUEUE_ENQUEUE_ERROR["):
+        category = "queue_enqueue_failure"
+        source = raw_error.split("[", 1)[1].split("]", 1)[0] or "queue"
+        stage = "queue_enqueue"
+        upstream_service = "redis"
+        is_task_execution_failure = False
+        is_queue_enqueue_failure = True
+        summary = "Task could not be enqueued to Redis; scheduler retry is scheduled."
+    elif error_type == "APIConnectionError" or raw_error.startswith("OPENAI_API_CONNECTION_ERROR:") or raw_error == "Connection error.":
+        category = "upstream_connection_failure"
+        source = "worker"
+        stage = "worker_upstream_request"
+        upstream_service = "openai"
+        summary = "Worker failed while calling the OpenAI API; this is an upstream connection failure."
+    elif raw_error.startswith("VALIDATION_ERROR:"):
+        category = "validation_failure"
+        stage = "payload_validation"
+        summary = "Task payload validation failed before execution could complete."
+    elif raw_error.startswith("NON_RETRYABLE_ERROR:"):
+        category = "non_retryable_failure"
+        stage = "worker_handler"
+        summary = "Worker marked the task as permanently failed with a non-retryable error."
+    elif "blocked" in raw_error.lower() and "budget" in raw_error.lower():
+        category = "budget_blocked"
+        source = "api"
+        stage = "task_creation"
+        is_task_execution_failure = False
+        summary = "Task creation was blocked by the current budget policy."
+
+    return {
+        "summary": summary,
+        "category": category,
+        "source": source,
+        "stage": stage,
+        "error_type": error_type,
+        "error_message": raw_error or None,
+        "upstream_service": upstream_service,
+        "retry_scheduled": retry_scheduled,
+        "retry_at": retry_at,
+        "is_browser_disconnect": is_browser_disconnect,
+        "is_task_execution_failure": is_task_execution_failure,
+        "is_queue_enqueue_failure": is_queue_enqueue_failure,
+        "is_scheduler_runtime_failure": is_scheduler_runtime_failure,
+    }
+
+
+def _task_to_out(task: Task, debug_payload: dict[str, Any] | None = None) -> TaskOut:
+    diagnostics = _derive_failure_diagnostics(error_text=task.error, debug_payload=debug_payload)
+    return TaskOut(**task.__dict__, diagnostics=diagnostics)
+
+
+def _run_to_out(run: Run, debug_payload: dict[str, Any] | None = None) -> RunOut:
+    diagnostics = _derive_failure_diagnostics(error_text=run.error, debug_payload=debug_payload)
+    return RunOut(**run.__dict__, diagnostics=diagnostics)
+
+
+def _build_enqueue_failure_error(source: str, exc: Exception) -> str:
+    source_label = source.strip() or "unknown"
+    return f"QUEUE_ENQUEUE_ERROR[{source_label}]: {type(exc).__name__}: {exc}"
+
+
+def schedule_enqueue_recovery(task_id: str, *, source: str, error: Exception, retry_delay_seconds: int = ENQUEUE_RECOVERY_DELAY_SEC) -> dict[str, Any]:
+    scheduled_retry_at = now_utc() + timedelta(seconds=max(int(retry_delay_seconds), 10))
+    error_text = _build_enqueue_failure_error(source, error)
+    task_type: str | None = None
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        if task is not None:
+            task.status = TaskStatus.queued
+            task.next_run_at = scheduled_retry_at
+            task.error = error_text
+            task.updated_at = now_utc()
+            task_type = task.task_type
+            db.commit()
+
+    try:
+        persist_event_log(
+            event_type="task_enqueue_failed",
+            source=source,
+            level="ERROR",
+            message="Task enqueue failed",
+            metadata_json={
+                "task_id": task_id,
+                "task_type": task_type,
+                "error": error_text,
+                "error_type": type(error).__name__,
+                "scheduled_retry_at": scheduled_retry_at.isoformat(),
+                "upstream_service": "redis",
+            },
+        )
+    except Exception:
+        logger.exception("enqueue_failure_event_log_failed")
+
+    logger.error(
+        "task_enqueue_failed source=%s task_id=%s task_type=%s retry_at=%s error=%s",
+        source,
+        task_id,
+        task_type,
+        scheduled_retry_at.isoformat(),
+        error_text,
+    )
+    return {
+        "task_id": task_id,
+        "task_type": task_type,
+        "error": error_text,
+        "error_type": type(error).__name__,
+        "scheduled_retry_at": scheduled_retry_at,
+    }
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     if API_KEY and not _is_exempt_path(request.url.path):
@@ -516,6 +712,22 @@ class TaskCreate(BaseModel):
     expected_tokens_out: Optional[int] = Field(default=None, ge=0)
 
 
+class FailureDiagnosticsOut(BaseModel):
+    summary: str
+    category: str
+    source: str
+    stage: str
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    upstream_service: Optional[str] = None
+    retry_scheduled: bool = False
+    retry_at: Optional[datetime] = None
+    is_browser_disconnect: bool = False
+    is_task_execution_failure: bool = False
+    is_queue_enqueue_failure: bool = False
+    is_scheduler_runtime_failure: bool = False
+
+
 class TaskOut(BaseModel):
     id: str
     created_at: datetime
@@ -534,6 +746,7 @@ class TaskOut(BaseModel):
     max_cost_usd: Optional[Decimal] = None
     expected_tokens_in: Optional[int] = None
     expected_tokens_out: Optional[int] = None
+    diagnostics: Optional[FailureDiagnosticsOut] = None
 
 
 class RunOut(BaseModel):
@@ -550,6 +763,7 @@ class RunOut(BaseModel):
     cost_usd: Optional[Decimal] = None
     error: Optional[str] = None
     created_at: datetime
+    diagnostics: Optional[FailureDiagnosticsOut] = None
 
 
 class TaskResultOut(BaseModel):
@@ -558,6 +772,39 @@ class TaskResultOut(BaseModel):
     content_text: Optional[str] = None
     content_json: Optional[Any] = None
     created_at: datetime
+
+
+class RuntimeAgentStatusOut(BaseModel):
+    name: str
+    healthy: bool
+    status: str
+    last_seen_at: Optional[datetime] = None
+    age_seconds: Optional[int] = None
+    message: Optional[str] = None
+
+
+class RuntimeStatusOut(BaseModel):
+    captured_at: datetime
+    api_healthy: bool
+    ready_status: str
+    ready_error: Optional[str] = None
+    redis_reachable: bool
+    queue_depth: Optional[int] = None
+    stale_after_seconds: int
+    scheduler_heartbeat: RuntimeAgentStatusOut
+    worker_heartbeat: RuntimeAgentStatusOut
+    last_scheduler_tick_at: Optional[datetime] = None
+
+
+class HealthOut(BaseModel):
+    status: str
+    service: str
+    utc_now: Optional[str] = None
+
+
+class ReadyOut(BaseModel):
+    status: str
+    error: Optional[str] = None
 
 
 class ScheduleCreate(BaseModel):
@@ -649,13 +896,13 @@ def app_ui_fallback(full_path: str) -> FileResponse:
     return _frontend_index_or_503()
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "api"}
+@app.get("/health", response_model=HealthOut)
+def health() -> HealthOut:
+    return HealthOut(status="ok", service="api", utc_now=now_utc().isoformat())
 
 
-@app.get("/ready")
-def ready():
+@app.get("/ready", response_model=ReadyOut)
+def ready() -> ReadyOut | JSONResponse:
     try:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
@@ -665,7 +912,91 @@ def ready():
             status_code=503,
             content={"status": "not_ready", "error": str(exc)},
         )
-    return {"status": "ready"}
+    return ReadyOut(status="ready")
+
+
+@app.get("/telemetry/runtime-status", response_model=RuntimeStatusOut)
+def get_runtime_status() -> RuntimeStatusOut:
+    captured_at = now_utc()
+    ready_status = "ready"
+    ready_error: str | None = None
+    redis_reachable = False
+    queue_depth: int | None = None
+
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+    except Exception as exc:
+        ready_status = "not_ready"
+        ready_error = str(exc)
+
+    try:
+        redis_conn.ping()
+        redis_reachable = True
+        queue_depth = int(queue.count)
+    except Exception as exc:
+        redis_reachable = False
+        if ready_error is None:
+            ready_status = "not_ready"
+            ready_error = str(exc)
+
+    stale_after_seconds = DEFAULT_HEARTBEAT_STALE_AFTER_SEC
+    tracked = _tracked_agent_names_for_telemetry()
+    heartbeats = list_recent_agent_heartbeats(limit=max(len(tracked) + 8, 20))
+    latest_by_agent: dict[str, dict[str, Any]] = {}
+    for row in heartbeats:
+        agent_name = str(row.get("agent_name") or "").strip()
+        if agent_name and agent_name not in latest_by_agent:
+            latest_by_agent[agent_name] = row
+
+    def _agent_status(agent_name: str) -> RuntimeAgentStatusOut:
+        row = latest_by_agent.get(agent_name)
+        if row is None:
+            return RuntimeAgentStatusOut(
+                name=agent_name,
+                healthy=False,
+                status="missing",
+                last_seen_at=None,
+                age_seconds=None,
+                message="No recent heartbeat recorded.",
+            )
+        seen_at = _parse_iso_datetime(row.get("last_seen_at"))
+        age_seconds = None if seen_at is None else max(int((captured_at - seen_at).total_seconds()), 0)
+        healthy = age_seconds is not None and age_seconds <= stale_after_seconds
+        status = str(row.get("status") or ("alive" if healthy else "stale"))
+        message = "Heartbeat is recent." if healthy else f"Heartbeat age exceeds {stale_after_seconds}s."
+        return RuntimeAgentStatusOut(
+            name=agent_name,
+            healthy=healthy,
+            status=status,
+            last_seen_at=seen_at,
+            age_seconds=age_seconds,
+            message=message,
+        )
+
+    scheduler_name = os.getenv("SCHEDULER_NAME", "scheduler").strip() or "scheduler"
+    worker_name = os.getenv("WORKER_NAME", "worker").strip() or "worker"
+
+    last_scheduler_tick_at: datetime | None = None
+    recent_events = list_recent_events(limit=200)
+    for row in recent_events:
+        if str(row.get("event_type") or "") == "scheduler_tick":
+            last_scheduler_tick_at = _parse_iso_datetime(row.get("created_at"))
+            if last_scheduler_tick_at is not None:
+                break
+
+    return RuntimeStatusOut(
+        captured_at=captured_at,
+        api_healthy=ready_status == "ready",
+        ready_status=ready_status,
+        ready_error=ready_error,
+        redis_reachable=redis_reachable,
+        queue_depth=queue_depth,
+        stale_after_seconds=stale_after_seconds,
+        scheduler_heartbeat=_agent_status(scheduler_name),
+        worker_heartbeat=_agent_status(worker_name),
+        last_scheduler_tick_at=last_scheduler_tick_at,
+    )
 
 
 @app.get("/metrics")
@@ -729,7 +1060,7 @@ def create_task(req: TaskCreate, request: Request):
                     task_type=req.task_type,
                     idempotency_key=req.idempotency_key,
                 )
-                return TaskOut(**existing.__dict__)
+                return _task_to_out(existing)
 
         is_available, spend, remaining = enforce_budget(db, BUDGET_BUFFER_USD)
         task_id = str(uuid.uuid4())
@@ -780,11 +1111,11 @@ def create_task(req: TaskCreate, request: Request):
                             task_type=req.task_type,
                             idempotency_key=req.idempotency_key,
                         )
-                        return TaskOut(**existing.__dict__)
+                        return _task_to_out(existing)
                 raise HTTPException(status_code=409, detail="Task idempotency conflict")
             db.refresh(t)
             increment_metric("tasks_blocked_budget_total")
-            return TaskOut(**t.__dict__)
+            return _task_to_out(t)
 
         chosen_model = choose_model(
             task_type=req.task_type,
@@ -823,23 +1154,28 @@ def create_task(req: TaskCreate, request: Request):
                         task_type=req.task_type,
                         idempotency_key=req.idempotency_key,
                     )
-                    return TaskOut(**existing.__dict__)
+                    return _task_to_out(existing)
             raise HTTPException(status_code=409, detail="Task idempotency conflict")
 
-    queue.enqueue("worker.run_task", task_id)
-    increment_metric("tasks_created_total")
-    log_event("task_queued", task_id=task_id, task_type=req.task_type, model=chosen_model)
+    try:
+        queue.enqueue("worker.run_task", task_id)
+        increment_metric("tasks_created_total")
+        log_event("task_queued", task_id=task_id, task_type=req.task_type, model=chosen_model)
+    except Exception as exc:
+        schedule_enqueue_recovery(task_id, source="api", error=exc)
+        log_event("task_queue_recovery_scheduled", task_id=task_id, task_type=req.task_type, model=chosen_model)
 
     with SessionLocal() as db:
         t2 = db.get(Task, task_id)
-        return TaskOut(**t2.__dict__)
+        return _task_to_out(t2)
 
 
 @app.get("/tasks", response_model=List[TaskOut])
 def list_tasks(limit: int = 50):
     with SessionLocal() as db:
         rows = db.query(Task).order_by(Task.created_at.desc()).limit(limit).all()
-        return [TaskOut(**t.__dict__) for t in rows]
+        debug_by_task_id = _latest_debug_artifacts_by_task_id(db, {row.id for row in rows})
+        return [_task_to_out(task, debug_by_task_id.get(task.id)) for task in rows]
 
 
 @app.get("/tasks/{task_id}", response_model=TaskOut)
@@ -848,7 +1184,8 @@ def get_task(task_id: str):
         t = db.get(Task, task_id)
         if not t:
             raise HTTPException(status_code=404, detail="Task not found")
-        return TaskOut(**t.__dict__)
+        debug_by_task_id = _latest_debug_artifacts_by_task_id(db, {t.id})
+        return _task_to_out(t, debug_by_task_id.get(t.id))
 
 
 @app.get("/tasks/{task_id}/result", response_model=TaskResultOut)
@@ -883,7 +1220,8 @@ def get_task_result(task_id: str):
 def list_runs(limit: int = 50):
     with SessionLocal() as db:
         rows = db.query(Run).order_by(Run.created_at.desc()).limit(limit).all()
-        return [RunOut(**r.__dict__) for r in rows]
+        debug_by_run_id = _latest_debug_artifacts_by_run_id(db, {row.id for row in rows})
+        return [_run_to_out(run, debug_by_run_id.get(run.id)) for run in rows]
 
 
 @app.get("/tasks/{task_id}/runs", response_model=List[RunOut])
@@ -893,7 +1231,8 @@ def get_task_runs(task_id: str, limit: int = 50):
         if not t:
             raise HTTPException(status_code=404, detail="Task not found")
         runs = db.query(Run).filter(Run.task_id == task_id).order_by(Run.attempt.desc()).limit(limit).all()
-        return [RunOut(**r.__dict__) for r in runs]
+        debug_by_run_id = _latest_debug_artifacts_by_run_id(db, {row.id for row in runs})
+        return [_run_to_out(run, debug_by_run_id.get(run.id)) for run in runs]
 
 
 @app.post("/schedules", response_model=ScheduleOut)

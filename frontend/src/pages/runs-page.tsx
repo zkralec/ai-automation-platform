@@ -108,6 +108,15 @@ function taskFailureMode(task: TaskOut, attemptCount: number): RunFailureMode {
   return null;
 }
 
+function describeDiagnostics(task: TaskOut | undefined): string | null {
+  if (!task?.diagnostics) return task?.error || null;
+  const bits = [task.diagnostics.summary];
+  if (task.diagnostics.upstream_service) bits.push(`upstream=${task.diagnostics.upstream_service}`);
+  if (task.diagnostics.source) bits.push(`source=${task.diagnostics.source}`);
+  if (task.diagnostics.stage) bits.push(`stage=${task.diagnostics.stage}`);
+  return bits.filter(Boolean).join(" · ");
+}
+
 function PreviewFallback({ payload }: { payload: unknown }): JSX.Element {
   if (payload === null || payload === undefined) {
     return <EmptyState title="No result preview available" description="This run has no structured result payload yet." />;
@@ -565,9 +574,9 @@ export function RunsPage(): JSX.Element {
                         <div className="mt-1">{timestampLabel(selectedTask.updated_at)}</div>
                       </div>
                     </div>
-                    {selectedTask.error ? (
+                    {describeDiagnostics(selectedTask) ? (
                       <div className="rounded border border-destructive/35 bg-destructive/10 p-2 text-destructive">
-                        {selectedTask.error}
+                        {describeDiagnostics(selectedTask)}
                       </div>
                     ) : null}
                   </div>

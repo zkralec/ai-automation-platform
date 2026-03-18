@@ -356,7 +356,7 @@ function buildTaskSignals(tasks: TaskOut[]): AlertSignal[] {
       const signal: AlertSignal = {
         id: `task-${task.id}`,
         title: `${task.task_type} ${task.status.replace(/_/g, " ")}`,
-        explanation: summarizeText(task.error || "Task requires operator review."),
+        explanation: summarizeText(task.diagnostics?.summary || task.error || "Task requires operator review."),
         source: "task-runner",
         level: severity,
         createdAt: task.updated_at,
@@ -369,7 +369,7 @@ function buildTaskSignals(tasks: TaskOut[]): AlertSignal[] {
         signature:
           family === "notify-failure"
             ? `task:notify-failure:${task.status}`
-            : `task:${task.task_type}:${task.status}:${normalizeForSignature(task.error || "")}`,
+            : `task:${task.task_type}:${task.status}:${normalizeForSignature(task.diagnostics?.summary || task.error || "")}`,
         priority: 0,
         createdAtMs,
         family,

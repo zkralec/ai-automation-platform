@@ -8,6 +8,7 @@ import {
   getPlannerStatus,
   getPromMetrics,
   getReadyStatus,
+  getRuntimeStatus,
   getStaleHeartbeats,
   getStatsToday,
   getSystemLatest,
@@ -24,6 +25,7 @@ export const telemetryKeys = {
   prom: ["telemetry", "prom"] as const,
   health: ["telemetry", "health"] as const,
   ready: ["telemetry", "ready"] as const,
+  runtimeStatus: ["telemetry", "runtime-status"] as const,
   heartbeats: (limit: number) => ["telemetry", "heartbeats", { limit }] as const,
   heartbeatSummary: (staleAfterSeconds: number | "default", limit: number) =>
     ["telemetry", "heartbeats-summary", { staleAfterSeconds, limit }] as const,
@@ -65,6 +67,10 @@ export function useHealthStatus() {
 
 export function useReadyStatus() {
   return useQuery({ queryKey: telemetryKeys.ready, queryFn: getReadyStatus, refetchInterval: 10_000 });
+}
+
+export function useRuntimeStatus() {
+  return useQuery({ queryKey: telemetryKeys.runtimeStatus, queryFn: getRuntimeStatus, refetchInterval: 10_000 });
 }
 
 export function useHeartbeats(limit = 100) {

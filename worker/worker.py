@@ -335,6 +335,16 @@ def is_transient_error(exc: Exception) -> bool:
     return any(keyword in message for keyword in keywords)
 
 
+def describe_runtime_error(exc: Exception) -> str:
+    raw = str(exc).strip() or type(exc).__name__
+    error_type = type(exc).__name__
+    if error_type == "APIConnectionError":
+        return f"OPENAI_API_CONNECTION_ERROR: {raw}"
+    if isinstance(exc, ConnectionError):
+        return f"CONNECTION_ERROR[{error_type}]: {raw}"
+    return raw
+
+
 def retry_delay_seconds(attempt: int) -> int:
     exp = max(attempt - 1, 0)
     delay = RETRY_BASE_SECONDS * (2 ** exp)
@@ -1662,6 +1672,7 @@ def run_task(task_id: str) -> None:
         final_task_status_value = TaskStatus.failed_permanent.value
         usage_tokens_in, usage_tokens_out, usage_cost_usd, usage_request_ids, usage_ai_task_run_ids = _parse_exception_usage(e)
         resolved_failure_cost = to_decimal_8(usage_cost_usd)
+        described_error = describe_runtime_error(e)
         with SessionLocal() as db:
             run = db.get(Run, run_id)
             t = db.get(Task, task_id)
@@ -1679,7 +1690,7 @@ def run_task(task_id: str) -> None:
                 run.tokens_in = _as_int(usage_tokens_in)
                 run.tokens_out = _as_int(usage_tokens_out)
                 run.cost_usd = resolved_failure_cost
-                run.error = str(e)
+                run.error = described_error
 
             if t is not None:
                 if can_retry:
@@ -1687,7 +1698,7 @@ def run_task(task_id: str) -> None:
                     retry_at = now_utc() + timedelta(seconds=delay_s)
                     t.status = TaskStatus.queued
                     t.next_run_at = retry_at
-                    t.error = str(e)
+                    t.error = described_error
                     t.updated_at = now_utc()
                 else:
                     if attempt is not None and attempt >= task_max_attempts:
@@ -1695,7 +1706,7 @@ def run_task(task_id: str) -> None:
                     else:
                         t.status = TaskStatus.failed
                     t.next_run_at = None
-                    t.error = str(e)
+                    t.error = described_error
                     t.updated_at = now_utc()
                 final_task_status_value = t.status.value
                 db.flush()
@@ -1726,27 +1737,45 @@ def run_task(task_id: str) -> None:
                         "retry_scheduled": bool(can_retry),
                         "retry_at": retry_at.isoformat() if retry_at is not None else None,
                         "error_type": type(e).__name__,
-                        "error": str(e),
+                        "error": described_error,
                     },
                 )
 
             db.commit()
 
         if can_retry and retry_at is not None:
-            queue.enqueue_at(retry_at, "worker.run_task", task_id)
+            try:
+                queue.enqueue_at(retry_at, "worker.run_task", task_id)
+            except Exception as enqueue_exc:
+                logger.exception("retry_enqueue_at_failed task_id=%s retry_at=%s", task_id, retry_at.isoformat())
+                _safe_persist_event(
+                    event_type="task_enqueue_failed",
+                    source="worker",
+                    level="ERROR",
+                    message=f"Retry enqueue failed: {task_type}",
+                    metadata_json={
+                        "task_id": task_id,
+                        "run_id": run_id,
+                        "attempt": attempt,
+                        "error": f"{type(enqueue_exc).__name__}: {enqueue_exc}",
+                        "scheduled_retry_at": retry_at.isoformat(),
+                        "upstream_service": "redis",
+                    },
+                )
+                return
             log_event(
                 logging.WARNING,
                 "run_retry_scheduled",
                 final_run_status=RunStatus.failed.value,
                 final_task_status=TaskStatus.queued.value,
                 wall_time_ms=wall_time_ms,
-                error=str(e),
+                error=described_error,
                 retry_at=retry_at.isoformat(),
                 max_attempts=task_max_attempts,
             )
             _safe_fail_task_run(
                 history_task_run_id,
-                error_text=str(e),
+                error_text=described_error,
                 output_json={"will_retry": True, "retry_at": retry_at.isoformat()},
                 duration_ms=wall_time_ms,
                 ended_at=now_utc(),
@@ -1760,7 +1789,7 @@ def run_task(task_id: str) -> None:
                     "task_id": task_id,
                     "run_id": run_id,
                     "attempt": attempt,
-                    "error": str(e),
+                    "error": described_error,
                     "retry_at": retry_at.isoformat(),
                 },
             )
@@ -1768,7 +1797,7 @@ def run_task(task_id: str) -> None:
 
         _safe_fail_task_run(
             history_task_run_id,
-            error_text=str(e),
+            error_text=described_error,
             output_json={"will_retry": False, "task_status": final_task_status_value},
             duration_ms=wall_time_ms,
             ended_at=now_utc(),
@@ -1778,7 +1807,7 @@ def run_task(task_id: str) -> None:
             source="worker",
             level="ERROR",
             message=f"Task failed: {task_type}",
-            metadata_json={"task_id": task_id, "run_id": run_id, "attempt": attempt, "error": str(e)},
+            metadata_json={"task_id": task_id, "run_id": run_id, "attempt": attempt, "error": described_error},
         )
         log_event(
             logging.ERROR,
@@ -1786,7 +1815,7 @@ def run_task(task_id: str) -> None:
             final_run_status=RunStatus.failed.value,
             final_task_status=final_task_status_value,
             wall_time_ms=wall_time_ms,
-            error=str(e),
+            error=described_error,
             max_attempts=task_max_attempts,
         )
         raise

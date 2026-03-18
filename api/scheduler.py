@@ -31,6 +31,7 @@ from planner_control import (
 )
 from system_metrics import collect_system_metrics_snapshot, get_latest_system_metrics
 from main import (
+    ENQUEUE_RECOVERY_DELAY_SEC,
     Run,
     RunStatus,
     Schedule,
@@ -40,6 +41,7 @@ from main import (
     choose_model,
     now_utc,
     queue,
+    schedule_enqueue_recovery,
 )
 
 
@@ -210,8 +212,19 @@ def _enqueue_daily_report_notification(
         db.add(task)
         db.commit()
 
-    queue.enqueue("worker.run_task", task_id)
-    return task_id, True
+    try:
+        queue.enqueue("worker.run_task", task_id)
+        return task_id, True
+    except Exception as exc:
+        schedule_enqueue_recovery(task_id, source="scheduler", error=exc, retry_delay_seconds=ENQUEUE_RECOVERY_DELAY_SEC)
+        _log(
+            "daily_report_notification_enqueue_failed",
+            level="ERROR",
+            task_id=task_id,
+            report_date=report_date,
+            error=str(exc),
+        )
+        return task_id, False
 
 
 def _emit_scheduler_heartbeat(*, status: str, metadata_json: dict[str, object] | None = None) -> None:
@@ -444,6 +457,7 @@ def recover_stale_running_tasks(now: datetime | None = None) -> dict[str, int]:
         try:
             queue.enqueue("worker.run_task", task_id)
         except Exception as exc:
+            schedule_enqueue_recovery(task_id, source="scheduler", error=exc, retry_delay_seconds=ENQUEUE_RECOVERY_DELAY_SEC)
             _log(
                 "stale_running_task_reenqueue_failed",
                 level="ERROR",
@@ -740,15 +754,30 @@ def enqueue_due_schedules() -> int:
                     next_run_at=None,
                 )
                 db.add(task)
-                queue.enqueue("worker.run_task", task_id)
-                created_count += 1
-                _log(
-                    "scheduled_task_enqueued",
-                    schedule_id=sched.id,
-                    task_id=task_id,
-                    task_type=sched.task_type,
-                    idempotency_key=idempotency_key,
-                )
+                try:
+                    queue.enqueue("worker.run_task", task_id)
+                    created_count += 1
+                    _log(
+                        "scheduled_task_enqueued",
+                        schedule_id=sched.id,
+                        task_id=task_id,
+                        task_type=sched.task_type,
+                        idempotency_key=idempotency_key,
+                    )
+                except Exception as exc:
+                    task.error = f"QUEUE_ENQUEUE_ERROR[scheduler]: {type(exc).__name__}: {exc}"
+                    task.next_run_at = now + timedelta(seconds=ENQUEUE_RECOVERY_DELAY_SEC)
+                    task.updated_at = now
+                    _log(
+                        "scheduled_task_enqueue_failed",
+                        level="ERROR",
+                        schedule_id=sched.id,
+                        task_id=task_id,
+                        task_type=sched.task_type,
+                        idempotency_key=idempotency_key,
+                        scheduled_retry_at=task.next_run_at.isoformat(),
+                        error=str(exc),
+                    )
 
             sched.last_run_at = now
             sched.next_run_at = _next_from_cron(sched.cron, now)
@@ -776,15 +805,28 @@ def enqueue_due_retry_tasks() -> int:
         )
 
         for task in due_tasks:
-            task.next_run_at = None
-            task.updated_at = now
-            queue.enqueue("worker.run_task", task.id)
-            enqueued_count += 1
-            _log(
-                "retry_task_enqueued",
-                task_id=task.id,
-                task_type=task.task_type,
-            )
+            try:
+                queue.enqueue("worker.run_task", task.id)
+                task.next_run_at = None
+                task.updated_at = now
+                enqueued_count += 1
+                _log(
+                    "retry_task_enqueued",
+                    task_id=task.id,
+                    task_type=task.task_type,
+                )
+            except Exception as exc:
+                task.error = f"QUEUE_ENQUEUE_ERROR[scheduler]: {type(exc).__name__}: {exc}"
+                task.next_run_at = now + timedelta(seconds=ENQUEUE_RECOVERY_DELAY_SEC)
+                task.updated_at = now
+                _log(
+                    "retry_task_enqueue_failed",
+                    level="ERROR",
+                    task_id=task.id,
+                    task_type=task.task_type,
+                    scheduled_retry_at=task.next_run_at.isoformat(),
+                    error=str(exc),
+                )
 
         db.commit()
 
