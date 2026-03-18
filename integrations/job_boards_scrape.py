@@ -86,6 +86,79 @@ _BOARD_BASE_URLS = {
     "handshake": "https://joinhandshake.com",
 }
 
+_RELATIVE_POSTED_AT_RE = re.compile(
+    r"\b(?:just posted|today|yesterday|[0-9]{1,3}\+?\s*(?:minute|hour|day|week|month)s?\s+ago|[0-9]{1,3}d)\b",
+    re.IGNORECASE,
+)
+
+_BOARD_COMPANY_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "linkedin": (
+        re.compile(r'base-search-card__subtitle[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+        re.compile(r'job-search-card__subtitle[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "indeed": (
+        re.compile(r'data-testid="company-name"[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+        re.compile(r'companyName[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "glassdoor": (
+        re.compile(r'Employer[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+        re.compile(r'compactEmployerName[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "handshake": (
+        re.compile(r'employer[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+}
+
+_BOARD_LOCATION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "linkedin": (
+        re.compile(r'job-search-card__location[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "indeed": (
+        re.compile(r'data-testid="text-location"[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+        re.compile(r'companyLocation[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "glassdoor": (
+        re.compile(r'data-test="location"[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+        re.compile(r'location[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "handshake": (
+        re.compile(r'location[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+}
+
+_BOARD_POSTED_AT_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "linkedin": (
+        re.compile(r'<time[^>]*datetime="([^"]+)"', re.IGNORECASE | re.DOTALL),
+        re.compile(r'<time[^>]*>(.*?)</time>', re.IGNORECASE | re.DOTALL),
+    ),
+    "indeed": (
+        re.compile(r'data-testid="myJobsStateDate"[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+        re.compile(r'data-testid="date"[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "glassdoor": (
+        re.compile(r'data-test="detailText"[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "handshake": (
+        re.compile(r'posted[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+}
+
+_BOARD_DESCRIPTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "linkedin": (
+        re.compile(r'job-search-card__snippet[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "indeed": (
+        re.compile(r'job-snippet[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+        re.compile(r'data-testid="job-snippet"[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "glassdoor": (
+        re.compile(r'jobDescriptionSnippet[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+    "handshake": (
+        re.compile(r'description[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    ),
+}
+
 
 def _compact_ws(value: str) -> str:
     return " ".join(value.split())
@@ -160,6 +233,34 @@ def _extract_work_mode(text: str) -> str | None:
     if _ONSITE_RE.search(text):
         return "onsite"
     return None
+
+
+def _extract_pattern_text(patterns: tuple[re.Pattern[str], ...], html_text: str) -> str | None:
+    for pattern in patterns:
+        match = pattern.search(html_text)
+        if not match:
+            continue
+        value = _strip_html(match.group(1) or "")
+        if value:
+            return value
+    return None
+
+
+def _extract_posted_at(board_key: str, html_text: str, snippet_text: str) -> str | None:
+    board_value = _extract_pattern_text(_BOARD_POSTED_AT_PATTERNS.get(board_key) or (), html_text)
+    if board_value:
+        return board_value
+    relative = _RELATIVE_POSTED_AT_RE.search(snippet_text)
+    if relative:
+        return _compact_ws(relative.group(0))
+    return None
+
+
+def _extract_description(board_key: str, html_text: str, snippet_text: str) -> str | None:
+    board_value = _extract_pattern_text(_BOARD_DESCRIPTION_PATTERNS.get(board_key) or (), html_text)
+    if board_value:
+        return board_value[:500]
+    return snippet_text[:500] if snippet_text else None
 
 
 def _replace_query_params(url: str, params: dict[str, str]) -> str:
@@ -248,6 +349,10 @@ def _extract_jobs_from_html(board_key: str, *, html_text: str, base_url: str, se
         start, end = match.span()
         snippet_html = html_text[max(0, start - 900): min(len(html_text), end + 2000)]
         snippet = _strip_html(snippet_html)
+        company = _extract_pattern_text(_BOARD_COMPANY_PATTERNS.get(board_key) or (), snippet_html) or _extract_company(snippet)
+        location_text = _extract_pattern_text(_BOARD_LOCATION_PATTERNS.get(board_key) or (), snippet_html) or _extract_location(snippet)
+        posted_at = _extract_posted_at(board_key, snippet_html, snippet)
+        description_snippet = _extract_description(board_key, snippet_html, snippet)
         salary_min, salary_max = _extract_salary_range(snippet)
         experience_level = _extract_experience_level((raw_title + " " + snippet).lower())
         clearance_required, clearance_type = _extract_clearance((raw_title + " " + snippet).lower())
@@ -257,8 +362,8 @@ def _extract_jobs_from_html(board_key: str, *, html_text: str, base_url: str, se
             {
                 "source": board_key,
                 "title": raw_title,
-                "company": _extract_company(snippet),
-                "location": _extract_location(snippet) or location or None,
+                "company": company,
+                "location": location_text or location or None,
                 "url": url,
                 "salary_min": salary_min,
                 "salary_max": salary_max,
@@ -267,10 +372,18 @@ def _extract_jobs_from_html(board_key: str, *, html_text: str, base_url: str, se
                 "clearance_required": clearance_required,
                 "clearance_type": clearance_type,
                 "work_mode": work_mode,
-                "posted_at": None,
+                "posted_at": posted_at,
                 "scraped_at": scraped_at,
-                "description_snippet": snippet[:500] if snippet else None,
-                "raw": {"search_url": search_url},
+                "description_snippet": description_snippet,
+                "raw": {
+                    "board": board_key,
+                    "search_url": search_url,
+                    "job_url": url,
+                    "company_text": company,
+                    "location_text": location_text,
+                    "posted_at_text": posted_at,
+                    "description_text": description_snippet,
+                },
             }
         )
     return jobs

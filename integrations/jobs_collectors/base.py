@@ -192,6 +192,31 @@ def _job_key(job: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def _metadata_diagnostics(job: dict[str, Any]) -> dict[str, bool]:
+    return {
+        "missing_company": not bool(str(job.get("company") or "").strip()),
+        "missing_posted_at": not bool(str(job.get("posted_at") or "").strip()),
+        "missing_source_url": not bool(str(job.get("source_url") or "").strip()),
+        "missing_location": not bool(str(job.get("location") or "").strip()),
+    }
+
+
+def _empty_metadata_summary() -> dict[str, int]:
+    return {
+        "job_count": 0,
+        "missing_company": 0,
+        "missing_posted_at": 0,
+        "missing_source_url": 0,
+        "missing_location": 0,
+    }
+
+
+def _accumulate_metadata_summary(summary: dict[str, int], diagnostics: dict[str, bool]) -> None:
+    summary["job_count"] = int(summary.get("job_count", 0)) + 1
+    for key in ("missing_company", "missing_posted_at", "missing_source_url", "missing_location"):
+        summary[key] = int(summary.get(key, 0)) + int(bool(diagnostics.get(key)))
+
+
 def _title_seeds(request: dict[str, Any]) -> list[str]:
     titles = _dedupe_text_list(_as_text_list(request.get("titles")))
     desired_title = str(request.get("desired_title") or "").strip()
@@ -237,8 +262,8 @@ def _query_variants(request: dict[str, Any], *, title_seed: str, max_queries: in
 
 def _normalize_job(board: str, row: dict[str, Any], *, url_override: str | None) -> dict[str, Any]:
     raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
-    source_url = str(raw.get("search_url") or url_override or "").strip() or None
-    return {
+    source_url = str(row.get("url") or raw.get("job_url") or raw.get("search_url") or url_override or "").strip() or None
+    job = {
         "source": board,
         "source_url": source_url,
         "title": row.get("title"),
@@ -255,6 +280,8 @@ def _normalize_job(board: str, row: dict[str, Any], *, url_override: str | None)
         "description_snippet": row.get("description_snippet"),
         "source_metadata": raw,
     }
+    job["metadata_diagnostics"] = _metadata_diagnostics(job)
+    return job
 
 
 def _split_warnings_and_errors(board: str, messages: list[str]) -> tuple[list[str], list[str]]:
@@ -331,6 +358,7 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
     dropped_by_basic_filter_count = 0
     deduped_count = 0
     pages_fetched = 0
+    metadata_completeness_summary = _empty_metadata_summary()
 
     for location in locations:
         locations_attempted.append(location)
@@ -380,6 +408,10 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
                         deduped_count += 1
                         continue
                     seen_jobs.add(key)
+                    _accumulate_metadata_summary(
+                        metadata_completeness_summary,
+                        normalized.get("metadata_diagnostics") if isinstance(normalized.get("metadata_diagnostics"), dict) else {},
+                    )
                     collected.append(normalized)
                     if len(collected) >= max_jobs:
                         break
@@ -433,5 +465,6 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
             "pages_fetched": pages_fetched,
             "search_attempts": search_attempts,
             "basic_filter_mode": "minimal_exclude_only",
+            "metadata_completeness_summary": metadata_completeness_summary,
         },
     }

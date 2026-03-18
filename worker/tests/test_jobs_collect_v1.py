@@ -271,3 +271,64 @@ def test_jobs_collect_v1_empty_success_when_sources_return_no_jobs(monkeypatch) 
     assert artifact["collection_summary"]["dropped_by_basic_filter_count"] == 0
     assert artifact["collection_summary"]["deduped_count"] == 0
     assert result["next_tasks"][0]["task_type"] == "jobs_normalize_v1"
+
+
+def test_jobs_collect_v1_surfaces_source_metadata_quality(monkeypatch) -> None:
+    class _MetadataCollector:
+        SUPPORTED_FIELDS = {"source": "indeed"}
+
+        @staticmethod
+        def collect_jobs(request: dict, *, url_override: str | None = None) -> dict:
+            del request, url_override
+            return {
+                "status": "success",
+                "jobs": [
+                    {
+                        "source": "indeed",
+                        "source_url": "https://www.indeed.com/viewjob?jk=123",
+                        "title": "Senior Software Engineer",
+                        "company": None,
+                        "location": "Remote",
+                        "url": "https://www.indeed.com/viewjob?jk=123",
+                        "metadata_diagnostics": {
+                            "missing_company": True,
+                            "missing_posted_at": True,
+                            "missing_source_url": False,
+                            "missing_location": False,
+                        },
+                        "source_metadata": {"search_url": "https://www.indeed.com/jobs?q=senior+software+engineer"},
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+                "meta": {
+                    "returned_count": 1,
+                    "metadata_completeness_summary": {
+                        "job_count": 1,
+                        "missing_company": 1,
+                        "missing_posted_at": 1,
+                        "missing_source_url": 0,
+                        "missing_location": 0,
+                    },
+                },
+            }
+
+    monkeypatch.setattr(jobs_collect_v1, "_load_collector_module", lambda source: _MetadataCollector)
+
+    payload = {
+        "pipeline_id": "pipe-metadata-quality",
+        "request": {
+            "collectors_enabled": True,
+            "sources": ["indeed"],
+            "titles": ["Senior Software Engineer"],
+            "result_limit_per_source": 5,
+        },
+    }
+    result = jobs_collect_v1.execute(_task(payload), db=None)
+    artifact = result["content_json"]
+
+    assert artifact["source_metadata_quality"]["indeed"]["missing_company"] == 1
+    assert artifact["source_metadata_quality"]["indeed"]["missing_posted_at"] == 1
+    assert artifact["metadata_completeness_summary"]["missing_company"] == 1
+    assert artifact["collection_summary"]["missing_company"] == 1
+    assert artifact["collection_summary"]["missing_posted_at"] == 1

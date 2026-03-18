@@ -102,6 +102,16 @@ def _meta_count(meta: dict[str, Any], key: str, fallback: int = 0) -> int:
         return fallback
 
 
+def _empty_metadata_summary() -> dict[str, int]:
+    return {
+        "job_count": 0,
+        "missing_company": 0,
+        "missing_posted_at": 0,
+        "missing_source_url": 0,
+        "missing_location": 0,
+    }
+
+
 def execute(task: Any, db: Any) -> dict[str, Any]:
     del db
 
@@ -243,6 +253,8 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
     deduped_count = 0
     pages_fetched = 0
     queries_attempted: list[str] = []
+    metadata_completeness_summary = _empty_metadata_summary()
+    source_metadata_quality: dict[str, dict[str, int]] = {}
     for source_key, result in source_results.items():
         meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
         jobs_count = int(result.get("jobs_count", 0) or 0)
@@ -255,6 +267,18 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             for value in meta.get("queries_attempted") or []:
                 if isinstance(value, str) and value.strip() and value.strip() not in queries_attempted:
                     queries_attempted.append(value.strip())
+        source_summary = meta.get("metadata_completeness_summary") if isinstance(meta.get("metadata_completeness_summary"), dict) else None
+        if source_summary:
+            normalized_summary = {
+                "job_count": _meta_count(source_summary, "job_count", jobs_count),
+                "missing_company": _meta_count(source_summary, "missing_company", 0),
+                "missing_posted_at": _meta_count(source_summary, "missing_posted_at", 0),
+                "missing_source_url": _meta_count(source_summary, "missing_source_url", 0),
+                "missing_location": _meta_count(source_summary, "missing_location", 0),
+            }
+            source_metadata_quality[source_key] = normalized_summary
+            for key, value in normalized_summary.items():
+                metadata_completeness_summary[key] += value
 
     artifact = {
         "artifact_type": "jobs.collect.v1",
@@ -282,6 +306,8 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "dropped_by_basic_filter_count": dropped_by_basic_filter_count,
             "deduped_count": deduped_count,
         },
+        "source_metadata_quality": source_metadata_quality,
+        "metadata_completeness_summary": metadata_completeness_summary,
         "collection_summary": {
             "requested_sources": sources,
             "collectors_enabled": collectors_enabled,
@@ -296,6 +322,10 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "deduped_count": deduped_count,
             "pages_fetched": pages_fetched,
             "queries_attempted": queries_attempted,
+            "missing_company": metadata_completeness_summary["missing_company"],
+            "missing_posted_at": metadata_completeness_summary["missing_posted_at"],
+            "missing_source_url": metadata_completeness_summary["missing_source_url"],
+            "missing_location": metadata_completeness_summary["missing_location"],
         },
         "lineage": payload.get("lineage") if isinstance(payload.get("lineage"), dict) else {},
     }
