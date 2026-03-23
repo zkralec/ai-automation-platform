@@ -129,6 +129,31 @@ Then open on your laptop:
 
 This is the simplest and most reliable way to use Mission Control from a laptop.
 
+### If you use VS Code Remote SSH and want the direct numeric URL
+
+If you normally SSH into the mini-PC from VS Code and then `cmd` + click the link that Vite prints in the terminal, use the Vite dev server with a public bind address:
+
+```bash
+cd frontend
+npm run dev -- --host 0.0.0.0 --port 5173 --strictPort
+```
+
+Vite will print links like:
+
+- `http://192.168.18.210:5173/`
+- `http://100.110.193.90:5173/`
+
+In this setup, the direct numeric URL is the right one to open from your laptop browser.
+
+For this machine, the Tailscale address is usually the easiest:
+
+- `http://100.110.193.90:5173/`
+
+Why this works:
+- `--host 0.0.0.0` makes the dev server reachable from outside the mini-PC
+- `--strictPort` prevents Vite from silently switching to `5174`, `5175`, and so on
+- the numeric URL is often easier than relying on `localhost` forwarding when you are already working through VS Code Remote SSH
+
 ## Frontend Development
 
 Only use this when you are actively working on the React frontend.
@@ -149,7 +174,15 @@ npm install
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-If you are connecting from your laptop, start SSH with both forwards:
+Recommended improvement:
+
+```bash
+npm run dev -- --host 0.0.0.0 --port 5173 --strictPort
+```
+
+This is the best choice if you want the terminal to print one stable clickable numeric URL.
+
+If you are connecting from your laptop and want localhost-style forwarding instead, start SSH with both forwards:
 
 ```bash
 ssh -L 8000:127.0.0.1:8000 -L 5173:127.0.0.1:5173 your_user@mini-pc
@@ -161,7 +194,8 @@ Then open on your laptop:
 
 Notes:
 - The frontend dev server proxies API calls to `http://localhost:8000`.
-- If the tab appears to load forever, it is usually because the port was not forwarded or Vite was not started with `--host 0.0.0.0`.
+- If the tab appears to load forever, it is usually because the port was not forwarded, Vite was not started with `--host 0.0.0.0`, or Vite moved to a different port because `5173` was already in use.
+- If you prefer the direct-IP method, open the numeric `Network:` URL Vite prints in the terminal instead of `localhost`.
 
 Useful frontend commands:
 
@@ -408,6 +442,7 @@ Most common causes:
 - you opened `localhost` on your laptop without SSH port forwarding
 - you are using Vite dev mode without forwarding port `5173`
 - Vite was started without `--host 0.0.0.0`
+- Vite silently moved to another port because `5173` was already in use
 
 ### The built UI works, but the Vite dev UI does not
 
@@ -417,6 +452,25 @@ That usually means the backend is fine and the problem is only the dev-server ac
 ssh -L 8000:127.0.0.1:8000 -L 5173:127.0.0.1:5173 your_user@mini-pc
 cd frontend
 npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+If you use VS Code Remote SSH and the numeric URL works better for you, use this instead:
+
+```bash
+cd frontend
+npm run dev -- --host 0.0.0.0 --port 5173 --strictPort
+```
+
+Then open the exact `Network:` URL Vite prints, for example:
+
+```text
+http://100.110.193.90:5173/
+```
+
+If `5173` is already in use, clear old Vite processes first:
+
+```bash
+pkill -f vite
 ```
 
 ### Tasks should continue when my laptop disconnects
