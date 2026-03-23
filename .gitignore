@@ -12,3 +12,4 @@ __pycache__/
 *.sqlite3-shm
 *.sqlite3-wal
 *.tar.gz
+personal-startup-notes.md
