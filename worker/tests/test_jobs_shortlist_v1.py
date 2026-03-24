@@ -665,3 +665,70 @@ def test_jobs_shortlist_v1_old_notified_jobs_can_reappear_after_cooldown(monkeyp
     assert top["previously_notified"] is True
     assert top["suppressed_due_to_cooldown"] is False
     assert top["resurfaced_from_prior_runs"] is True
+
+
+def test_jobs_shortlist_v1_normalizes_history_datetimes_for_json(monkeypatch, tmp_path) -> None:
+    db = _sqlite_session(tmp_path)
+    now_utc = datetime(2026, 3, 24, 19, 29, 35, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(
+        jobs_shortlist_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs_scored.v1",
+            "jobs_scored": [
+                {
+                    "job_id": "j1",
+                    "canonical_job_key": "job:acme|software engineer|remote",
+                    "title": "Software Engineer",
+                    "company": "Acme",
+                    "source": "linkedin",
+                    "location": "Remote",
+                    "source_url": "https://example.test/jobs/1",
+                    "overall_score": 94,
+                    "score": 1.88,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        jobs_shortlist_v1,
+        "load_jobs_history",
+        lambda db, keys: {
+            "job:acme|software engineer|remote": {
+                "canonical_job_key": "job:acme|software engineer|remote",
+                "first_seen_at": now_utc - timedelta(days=7),
+                "last_seen_at": now_utc - timedelta(days=1),
+                "times_seen": 2,
+                "times_shortlisted": 1,
+                "times_notified": 0,
+                "last_shortlisted_at": now_utc - timedelta(days=2),
+                "last_notified_at": now_utc - timedelta(hours=12),
+            }
+        },
+    )
+
+    result = jobs_shortlist_v1.execute(
+        _task(
+            {
+                "pipeline_id": "pipe-short-history-json",
+                "upstream": {"task_id": "rank-task", "run_id": "rank-run", "task_type": "jobs_rank_v1"},
+                "request": {
+                    "shortlist_max_items": 1,
+                    "shortlist_min_score": 0.1,
+                    "jobs_notification_cooldown_days": 7,
+                },
+            },
+            run_id="run-short-history-json",
+        ),
+        db=db,
+    )
+
+    artifact = result["content_json"]
+    top = artifact["shortlist"][0]
+    assert top["history_first_seen_at"] == "2026-03-17T19:29:35Z"
+    assert top["history_last_seen_at"] == "2026-03-23T19:29:35Z"
+    assert top["history_last_shortlisted_at"] == "2026-03-22T19:29:35Z"
+    assert top["history_last_notified_at"] == "2026-03-24T07:29:35Z"
+    assert top["historical_state"]["last_notified_at"] == "2026-03-24T07:29:35Z"
+    json.dumps(artifact)

@@ -339,11 +339,62 @@ def _split_warnings_and_errors(board: str, messages: list[str]) -> tuple[list[st
             or "fetch_not_found_" in low
             or "fetch_http_" in low
             or "unsupported_board" in low
+            or "auth_blocked" in low
+            or "layout_mismatch" in low
+            or "upstream_failure" in low
+            or "login_wall" in low
+            or "auth_required" in low
+            or "unexpected_redirect" in low
+            or "selector_mismatch" in low
         ):
             errors.append(prefixed)
         else:
             warnings.append(prefixed)
     return warnings, errors
+
+
+def _source_status_priority(status: str) -> int:
+    return {
+        "empty_success": 1,
+        "upstream_failure": 2,
+        "layout_mismatch": 3,
+        "auth_blocked": 4,
+    }.get(status, 0)
+
+
+def _aggregate_source_status(
+    *,
+    search_attempts: list[dict[str, Any]],
+    errors: list[str],
+    collected_count: int,
+) -> tuple[str, str | None]:
+    if collected_count > 0:
+        return ("partial_success", None) if errors else ("success", None)
+
+    statuses = [str(row.get("source_status") or "").strip() for row in search_attempts if str(row.get("source_status") or "").strip()]
+    error_types = [
+        str(row.get("source_error_type") or row.get("error_type") or "").strip()
+        for row in search_attempts
+        if str(row.get("source_error_type") or row.get("error_type") or "").strip()
+    ]
+
+    chosen_status = "empty_success"
+    if statuses:
+        chosen_status = max(statuses, key=_source_status_priority)
+    elif errors:
+        chosen_status = "upstream_failure"
+
+    if chosen_status == "auth_blocked":
+        for candidate in ("unexpected_redirect", "login_wall", "auth_required"):
+            if candidate in error_types:
+                return chosen_status, candidate
+    if chosen_status == "layout_mismatch":
+        return chosen_status, "selector_mismatch"
+    if chosen_status == "upstream_failure":
+        return chosen_status, next((value for value in reversed(error_types) if value), "upstream_failure")
+    if chosen_status == "empty_success":
+        return chosen_status, next((value for value in reversed(error_types) if value), "empty_results")
+    return chosen_status, next((value for value in reversed(error_types) if value), None)
 
 
 def supported_fields(board: str | None = None) -> dict[str, Any]:
@@ -533,11 +584,23 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
                 "request_urls_tried": list(board_meta.get("request_urls_tried") or []),
                 "last_request_url": str(board_meta.get("last_request_url") or "").strip() or None,
                 "error_type": str(board_meta.get("error_type") or "").strip() or None,
+                "source_status": str(board_meta.get("source_status") or "").strip() or None,
+                "source_error_type": str(
+                    board_meta.get("source_error_type") or board_meta.get("error_type") or ""
+                ).strip()
+                or None,
                 "error_status": (
                     int(board_meta.get("error_status"))
                     if isinstance(board_meta.get("error_status"), int)
                     else None
                 ),
+                "cards_seen": int(board_meta.get("cards_seen") or 0),
+                "jobs_raw": int(board_meta.get("jobs_raw") or board_meta.get("discovered_raw_count") or len(jobs)),
+                "jobs_kept": len(jobs),
+                "auth_required_detected": bool(board_meta.get("auth_required_detected", False)),
+                "login_wall_detected": bool(board_meta.get("login_wall_detected", False)),
+                "unexpected_redirect_detected": bool(board_meta.get("unexpected_redirect_detected", False)),
+                "layout_mismatch_detected": bool(board_meta.get("layout_mismatch_detected", False)),
             }
         )
 
@@ -617,14 +680,14 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
             if isinstance(value, str) and value.strip() and value.strip() not in request_urls_tried:
                 request_urls_tried.append(value.strip())
 
-    status = "success"
-    if errors and collected:
-        status = "partial_success"
-    elif errors and not collected:
-        status = "failed"
+    source_status, source_error_type = _aggregate_source_status(
+        search_attempts=search_attempts,
+        errors=errors,
+        collected_count=len(collected),
+    )
 
     return {
-        "status": status,
+        "status": source_status,
         "jobs": collected,
         "warnings": warnings,
         "errors": errors,
@@ -653,6 +716,15 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
             "returned_count": len(collected),
             "pages_fetched": pages_fetched,
             "pages_attempted": pages_fetched,
+            "source_status": source_status,
+            "source_error_type": source_error_type,
+            "cards_seen": sum(int(row.get("cards_seen") or 0) for row in search_attempts),
+            "jobs_raw": discovered_raw_count,
+            "jobs_kept": len(collected),
+            "auth_required_detected": any(bool(row.get("auth_required_detected")) for row in search_attempts),
+            "login_wall_detected": any(bool(row.get("login_wall_detected")) for row in search_attempts),
+            "unexpected_redirect_detected": any(bool(row.get("unexpected_redirect_detected")) for row in search_attempts),
+            "layout_mismatch_detected": any(bool(row.get("layout_mismatch_detected")) for row in search_attempts),
             "jobs_found_per_query": jobs_found_per_query,
             "jobs_found_per_source": len(collected),
             "query_examples": [row.get("query") for row in query_plan[:5] if isinstance(row.get("query"), str)],
@@ -672,6 +744,14 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
                     row.get("error_type")
                     for row in reversed(search_attempts)
                     if isinstance(row.get("error_type"), str) and str(row.get("error_type")).strip()
+                ),
+                None,
+            ),
+            "source_error_type_last": next(
+                (
+                    row.get("source_error_type")
+                    for row in reversed(search_attempts)
+                    if isinstance(row.get("source_error_type"), str) and str(row.get("source_error_type")).strip()
                 ),
                 None,
             ),

@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_COLLECTOR_SOURCES = ("linkedin", "indeed", "glassdoor", "handshake")
 SUCCESSFUL_SOURCE_STATUSES = {"success", "partial_success"}
+EMPTY_SOURCE_STATUSES = {"empty", "empty_success"}
+FAILED_SOURCE_STATUSES = {"failed", "auth_blocked", "layout_mismatch", "upstream_failure"}
 MANUAL_SUPPORTED_FIELDS = {
     "source": "manual",
     "titles": True,
@@ -222,13 +224,22 @@ def _build_collection_observability(
                     "request_urls_tried": row.get("request_urls_tried") if isinstance(row.get("request_urls_tried"), list) else [],
                     "last_request_url": str(row.get("last_request_url") or "").strip() or None,
                     "error_type": str(row.get("error_type") or "").strip() or None,
+                    "source_status": str(row.get("source_status") or "").strip() or None,
+                    "source_error_type": str(row.get("source_error_type") or row.get("error_type") or "").strip() or None,
                     "error_status": row.get("error_status") if isinstance(row.get("error_status"), int) else None,
+                    "cards_seen": _meta_count(row, "cards_seen", 0),
+                    "jobs_raw": _meta_count(row, "jobs_raw", _meta_count(row, "discovered_raw_count", 0)),
+                    "jobs_kept": _meta_count(row, "jobs_kept", _meta_count(row, "returned_count", 0)),
+                    "auth_required_detected": bool(row.get("auth_required_detected", False)),
+                    "login_wall_detected": bool(row.get("login_wall_detected", False)),
                     "stop_reason": str(row.get("stop_reason") or "").strip() or None,
                 }
             )
 
         by_source[source_key] = {
             "status": result.get("status"),
+            "source_status": str(meta.get("source_status") or result.get("status") or "").strip() or None,
+            "source_error_type": str(meta.get("source_error_type") or meta.get("error_type") or "").strip() or None,
             "raw_jobs_discovered": discovered,
             "kept_after_basic_filter": kept,
             "jobs_dropped": dropped,
@@ -236,6 +247,9 @@ def _build_collection_observability(
             "final_raw_jobs": jobs_count,
             "pages_fetched": pages_fetched,
             "pages_attempted": _meta_count(meta, "pages_attempted", pages_fetched),
+            "cards_seen": _meta_count(meta, "cards_seen", discovered),
+            "jobs_raw": _meta_count(meta, "jobs_raw", discovered),
+            "jobs_kept": _meta_count(meta, "jobs_kept", jobs_count),
             "jobs_found_per_source": discovered,
             "queries_executed_count": queries_executed,
             "queries_attempted_count": len([row for row in queries_attempted if isinstance(row, str) and row.strip()]),
@@ -245,6 +259,8 @@ def _build_collection_observability(
             "last_request_url": str(meta.get("last_request_url") or "").strip() or None,
             "error_type": str(meta.get("error_type") or "").strip() or None,
             "error_status": meta.get("error_status") if isinstance(meta.get("error_status"), int) else None,
+            "auth_required_detected": bool(meta.get("auth_required_detected", False)),
+            "login_wall_detected": bool(meta.get("login_wall_detected", False)),
             "missing_counts": {
                 "company": _meta_count(metadata, "missing_company", 0),
                 "posted_at": _meta_count(metadata, "missing_posted_at", 0),
@@ -443,17 +459,19 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             source_meta["jobs_found_per_source"] = _meta_count(source_meta, "jobs_found_per_source", len(collected))
 
             status_raw = str(collector_result.get("status") or "").strip().lower()
-            if status_raw not in {"success", "partial_success", "failed"}:
+            if status_raw not in SUCCESSFUL_SOURCE_STATUSES | EMPTY_SOURCE_STATUSES | FAILED_SOURCE_STATUSES:
                 status_raw = "failed" if source_errors and not collected else "partial_success" if source_errors else "success"
+            if status_raw == "success" and not collected and not source_errors:
+                status_raw = "empty"
 
-            if status_raw == "failed" and not source_errors:
+            if status_raw in FAILED_SOURCE_STATUSES and not source_errors:
                 source_errors = [f"{source_key}: collector_failed_without_error_details"]
 
             raw_jobs.extend([row for row in collected if isinstance(row, dict)])
             warnings.extend(source_warnings)
             collector_errors.extend(source_errors)
 
-            if status_raw == "failed":
+            if status_raw in FAILED_SOURCE_STATUSES:
                 logger.error(
                     "jobs_collect source=%s failed: %s",
                     source_key,
@@ -461,7 +479,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 )
             else:
                 logger.info("jobs_collect source=%s jobs=%s status=%s", source_key, len(collected), status_raw)
-                if len(collected) == 0:
+                if status_raw in EMPTY_SOURCE_STATUSES:
                     logger.warning("jobs_collect source=%s jobs=0 status=empty", source_key)
 
             source_results[source_key] = {
@@ -489,8 +507,9 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             }
 
     successful_sources = [key for key, row in source_results.items() if row.get("status") in SUCCESSFUL_SOURCE_STATUSES]
+    empty_sources = [key for key, row in source_results.items() if row.get("status") in EMPTY_SOURCE_STATUSES]
     partial_sources = [key for key, row in source_results.items() if row.get("status") == "partial_success"]
-    failed_sources = [key for key, row in source_results.items() if row.get("status") == "failed"]
+    failed_sources = [key for key, row in source_results.items() if row.get("status") in FAILED_SOURCE_STATUSES]
     skipped_sources = [key for key, row in source_results.items() if row.get("status") == "skipped"]
 
     # All enabled sources failing is treated as transient so retries can recover.
@@ -499,7 +518,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         for source in sources
         if str(source).strip().lower() in SUPPORTED_COLLECTOR_SOURCES and collectors_enabled
     ]
-    if enabled_non_manual_sources and not successful_sources and not raw_jobs:
+    if enabled_non_manual_sources and failed_sources and len(failed_sources) == len(enabled_non_manual_sources) and not raw_jobs:
         raise RuntimeError(
             "jobs_collect_v1 all enabled sources failed: "
             + "; ".join(source_results[source]["error"] for source in failed_sources if source_results[source].get("error"))
@@ -581,6 +600,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "collection_status": collection_status,
         "partial_success": collection_status == "partial_success",
         "successful_sources": successful_sources,
+        "empty_sources": empty_sources,
         "partial_sources": partial_sources,
         "failed_sources": failed_sources,
         "skipped_sources": skipped_sources,
@@ -601,6 +621,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "requested_sources": sources,
             "collectors_enabled": collectors_enabled,
             "successful_source_count": len(successful_sources),
+            "empty_source_count": len(empty_sources),
             "partial_source_count": len(partial_sources),
             "failed_source_count": len(failed_sources),
             "skipped_source_count": len(skipped_sources),
@@ -629,6 +650,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "pipeline_id": pipeline_id,
         "sources_attempted": sources,
         "sources_succeeded": successful_sources,
+        "sources_empty": empty_sources,
         "sources_failed": failed_sources,
         "sources_skipped": skipped_sources,
         "per_source_job_counts": {key: int(row.get("jobs_count", 0) or 0) for key, row in source_results.items()},

@@ -56,6 +56,11 @@ def _db_supports_history(db: Any) -> bool:
 
 
 def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     if not isinstance(value, str):
         return None
     text = value.strip()
@@ -70,6 +75,18 @@ def _parse_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _history_timestamp_text(value: Any) -> str | None:
+    parsed = _parse_datetime(value)
+    if parsed is not None:
+        return parsed.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if value is None:
+        return None
+    return str(value)
 
 
 def _resolve_history_policy(shortlist_policy: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
@@ -202,7 +219,10 @@ def _annotate_jobs_with_history(
         previously_seen = times_seen > 0
         previously_shortlisted = times_shortlisted > 0
         previously_notified = times_notified > 0
-        last_notified_at = history.get("last_notified_at")
+        first_seen_at = _history_timestamp_text(history.get("first_seen_at"))
+        last_seen_at = _history_timestamp_text(history.get("last_seen_at"))
+        last_shortlisted_at = _history_timestamp_text(history.get("last_shortlisted_at"))
+        last_notified_at = _history_timestamp_text(history.get("last_notified_at"))
         last_notified_dt = _parse_datetime(last_notified_at)
         cooldown_active = False
         cooldown_remaining_days = 0
@@ -226,9 +246,9 @@ def _annotate_jobs_with_history(
         row["previously_shortlisted"] = previously_shortlisted
         row["previously_notified"] = previously_notified
         row["suppressed_due_to_cooldown"] = cooldown_active
-        row["history_first_seen_at"] = history.get("first_seen_at")
-        row["history_last_seen_at"] = history.get("last_seen_at")
-        row["history_last_shortlisted_at"] = history.get("last_shortlisted_at")
+        row["history_first_seen_at"] = first_seen_at
+        row["history_last_seen_at"] = last_seen_at
+        row["history_last_shortlisted_at"] = last_shortlisted_at
         row["history_last_notified_at"] = last_notified_at
         row["history_times_seen"] = times_seen
         row["history_times_shortlisted"] = times_shortlisted
@@ -236,12 +256,12 @@ def _annotate_jobs_with_history(
         row["history_cooldown_remaining_days"] = cooldown_remaining_days
         row["historical_state"] = {
             "canonical_job_key": canonical_job_key,
-            "first_seen_at": history.get("first_seen_at"),
-            "last_seen_at": history.get("last_seen_at"),
+            "first_seen_at": first_seen_at,
+            "last_seen_at": last_seen_at,
             "times_seen": times_seen,
             "times_shortlisted": times_shortlisted,
             "times_notified": times_notified,
-            "last_shortlisted_at": history.get("last_shortlisted_at"),
+            "last_shortlisted_at": last_shortlisted_at,
             "last_notified_at": last_notified_at,
             "newly_discovered": not previously_seen,
             "resurfaced_from_prior_runs": previously_seen,

@@ -954,10 +954,12 @@ def _build_discord_digest_message(
         for row in _showcase_jobs(jobs, limit=3):
             title = _compact_text(row.get("title") or "Unknown role", 120) or "Unknown role"
             company = _clean_company(row.get("company")) or "Not listed"
+            location = _clean_location(row.get("location")) or "Not listed"
             salary = _compact_text(row.get("salary") or _salary_text(row), 120) or "Not listed"
             job_link = _preferred_job_link(row)
             lines.append(f"Title: {title}")
             lines.append(f"Company: {company}")
+            lines.append(f"Location: {location}")
             lines.append(f"Salary: {salary}")
             lines.append(f"Link: <{job_link}>" if job_link else "Link: Not listed")
             lines.append("")

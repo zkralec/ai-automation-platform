@@ -138,9 +138,11 @@ def test_jobs_digest_v2_accepts_jobs_top_and_generates_llm_artifacts(monkeypatch
     notify_payload = result["next_tasks"][0]["payload_json"]
     assert "Title: Senior ML Engineer" in notify_payload["message"]
     assert "Company: Acme" in notify_payload["message"]
+    assert "Location: Remote" in notify_payload["message"]
     assert "Salary: USD 180,000 - 220,000" in notify_payload["message"]
     assert "Link: <https://linkedin.example/jobs/1>" in notify_payload["message"]
     assert "Title: Machine Learning Engineer" in notify_payload["message"]
+    assert "Location: New York, NY" in notify_payload["message"]
     assert "task=task-digest-1" not in notify_payload["message"]
     refs = notify_payload["metadata"]["artifact_references"]
     assert refs["task_id"] == "task-digest-1"
@@ -217,6 +219,7 @@ def test_jobs_digest_v2_retries_and_falls_back_by_default_when_strict_unspecifie
     notify_payload = result["next_tasks"][0]["payload_json"]
     assert "Title: AI Engineer" in notify_payload["message"]
     assert "Company: Acme" in notify_payload["message"]
+    assert "Location: Remote" in notify_payload["message"]
     assert "Salary: Not listed" in notify_payload["message"]
     assert "Link: <https://linkedin.example/jobs/1>" in notify_payload["message"]
 
@@ -571,6 +574,7 @@ def test_jobs_digest_v2_cleans_placeholder_company_and_prefers_direct_job_link(m
     assert "Unknown company" not in message
     assert "Title: Senior Software Engineer" in message
     assert "Company: Not listed" in message
+    assert "Location: Not listed" in message
     assert "Salary: Not listed" in message
     assert "Link: <https://www.indeed.com/viewjob?jk=123>" in message
     assert "Unknown company" not in markdown

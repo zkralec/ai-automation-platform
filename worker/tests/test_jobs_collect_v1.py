@@ -406,8 +406,10 @@ def test_jobs_collect_v1_empty_success_when_sources_return_no_jobs(monkeypatch) 
     assert artifact["collection_status"] == "success"
     assert artifact["partial_success"] is False
     assert artifact["raw_jobs"] == []
-    assert sorted(artifact["successful_sources"]) == ["indeed", "linkedin"]
+    assert artifact["successful_sources"] == []
+    assert sorted(artifact["empty_sources"]) == ["indeed", "linkedin"]
     assert artifact["failed_sources"] == []
+    assert artifact["collection_summary"]["empty_source_count"] == 2
     assert artifact["collection_summary"]["raw_job_count"] == 0
     assert artifact["collection_summary"]["discovered_raw_count"] == 0
     assert artifact["collection_summary"]["kept_after_basic_filter_count"] == 0
@@ -416,7 +418,8 @@ def test_jobs_collect_v1_empty_success_when_sources_return_no_jobs(monkeypatch) 
     assert result["next_tasks"][0]["task_type"] == "jobs_normalize_v1"
     assert result["debug_json"]["artifact_type"] == "debug.json"
     assert result["debug_json"]["per_source_job_counts"] == {"linkedin": 0, "indeed": 0}
-    assert result["debug_json"]["sources_succeeded"] == ["linkedin", "indeed"]
+    assert result["debug_json"]["sources_succeeded"] == []
+    assert sorted(result["debug_json"]["sources_empty"]) == ["indeed", "linkedin"]
     assert result["debug_json"]["sources_failed"] == []
 
 
@@ -643,11 +646,11 @@ def test_jobs_collect_v1_logs_per_source_execution_and_empty_results(monkeypatch
 
     messages = [record.getMessage() for record in caplog.records]
     assert any("jobs_collect source=glassdoor status=start" in message for message in messages)
-    assert any("jobs_collect source=glassdoor jobs=0 status=success" in message for message in messages)
     assert any("jobs_collect source=glassdoor jobs=0 status=empty" in message for message in messages)
     assert any("jobs_collect source=handshake status=start" in message for message in messages)
     assert any("jobs_collect source=handshake failed:" in message for message in messages)
-    assert result["debug_json"]["sources_succeeded"] == ["glassdoor"]
+    assert result["debug_json"]["sources_succeeded"] == []
+    assert result["debug_json"]["sources_empty"] == ["glassdoor"]
     assert result["debug_json"]["sources_failed"] == ["handshake"]
     assert result["debug_json"]["per_source_job_counts"] == {"glassdoor": 0, "handshake": 0}
 

@@ -16,6 +16,17 @@ def _to_iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _json_safe_timestamp(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return _to_iso(value)
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return str(value)
+
+
 def ensure_jobs_history_table(conn: Any) -> None:
     dialect = getattr(getattr(conn, "dialect", None), "name", "")
     if dialect == "sqlite":
@@ -66,13 +77,13 @@ def _history_row_to_dict(row: Any) -> dict[str, Any]:
     mapping = getattr(row, "_mapping", row)
     return {
         "canonical_job_key": str(mapping["canonical_job_key"]),
-        "first_seen_at": mapping["first_seen_at"],
-        "last_seen_at": mapping["last_seen_at"],
+        "first_seen_at": _json_safe_timestamp(mapping["first_seen_at"]),
+        "last_seen_at": _json_safe_timestamp(mapping["last_seen_at"]),
         "times_seen": int(mapping["times_seen"] or 0),
         "times_shortlisted": int(mapping["times_shortlisted"] or 0),
         "times_notified": int(mapping["times_notified"] or 0),
-        "last_shortlisted_at": mapping["last_shortlisted_at"],
-        "last_notified_at": mapping["last_notified_at"],
+        "last_shortlisted_at": _json_safe_timestamp(mapping["last_shortlisted_at"]),
+        "last_notified_at": _json_safe_timestamp(mapping["last_notified_at"]),
         "last_title": mapping["last_title"],
         "last_company": mapping["last_company"],
         "last_source": mapping["last_source"],

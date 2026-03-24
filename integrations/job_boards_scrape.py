@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 from html import unescape
+import os
 import re
 from typing import Any
 from urllib.error import HTTPError
@@ -12,6 +14,7 @@ from integrations.scrape_common import (
     absolute_url,
     clean_html_text,
     fetch_html,
+    fetch_html_response,
     now_utc_iso,
     parse_price,
 )
@@ -19,10 +22,14 @@ from integrations.scrape_common import (
 SUPPORTED_JOB_BOARDS = ("linkedin", "indeed", "glassdoor", "handshake")
 
 _ANCHOR_RE = re.compile(
-    r'<a[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+    r"""<a[^>]+href=["'](?P<href>[^"']+)["'][^>]*>(?P<title>.*?)</a>""",
     re.IGNORECASE | re.DOTALL,
 )
 _STRIP_TAGS_RE = re.compile(r"<[^>]+>")
+_HANDSHAKE_CARD_RE = re.compile(
+    r"""href=["'](?P<href>[^"']*(?:/stu/jobs/[0-9]+|/jobs/[0-9]+)[^"']*)["']""",
+    re.IGNORECASE,
+)
 
 _SALARY_RANGE_RE = re.compile(
     r"\$?\s*(?P<low>[0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?P<low_suffix>[kK]?)"
@@ -179,6 +186,43 @@ _BOARD_DESCRIPTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
         re.compile(r'description[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
     ),
 }
+
+_HANDSHAKE_LOGIN_WALL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\blog in\b", re.IGNORECASE),
+    re.compile(r"\bsign in\b", re.IGNORECASE),
+    re.compile(r"continue\s+with\s+your\s+school", re.IGNORECASE),
+    re.compile(r"sign in to view", re.IGNORECASE),
+    re.compile(r"please log in", re.IGNORECASE),
+)
+_HANDSHAKE_EMPTY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bno results\b", re.IGNORECASE),
+    re.compile(r"\b0 jobs\b", re.IGNORECASE),
+    re.compile(r"no jobs found", re.IGNORECASE),
+    re.compile(r"we couldn'?t find any jobs", re.IGNORECASE),
+    re.compile(r"try adjusting your filters", re.IGNORECASE),
+)
+_HANDSHAKE_SEARCH_CONTEXT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bjob postings\b", re.IGNORECASE),
+    re.compile(r"\bfilters\b", re.IGNORECASE),
+    re.compile(r"\bsearch results\b", re.IGNORECASE),
+    re.compile(r"\bjoinhandshake\b", re.IGNORECASE),
+)
+_HANDSHAKE_SEARCH_PATH_MARKERS = ("/stu/postings", "/students/jobs/search", "/jobs/search")
+_HANDSHAKE_AUTH_PATH_MARKERS = ("/login", "/sign_in", "/users/sign_in", "/session", "/sessions", "/auth")
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    low = raw.strip().lower()
+    if not low:
+        return default
+    if low in {"1", "true", "yes", "on"}:
+        return True
+    if low in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def _compact_ws(value: str) -> str:
@@ -403,6 +447,23 @@ def _request_options_for_board(board: str, *, search_url: str) -> dict[str, Any]
     }
 
 
+def _request_options_for_board_with_headers(
+    board: str,
+    *,
+    search_url: str,
+    extra_headers: dict[str, str] | None = None,
+    cache_ttl_seconds: int | None = None,
+) -> dict[str, Any]:
+    options = _request_options_for_board(board, search_url=search_url)
+    headers = dict(options.get("extra_headers") or {})
+    if extra_headers:
+        headers.update({key: value for key, value in extra_headers.items() if str(value).strip()})
+    options["extra_headers"] = headers
+    if cache_ttl_seconds is not None:
+        options["cache_ttl_seconds"] = cache_ttl_seconds
+    return options
+
+
 def _error_details(exc: Exception) -> tuple[str, int | None]:
     if isinstance(exc, HTTPError):
         if exc.code == 403:
@@ -416,6 +477,451 @@ def _error_details(exc: Exception) -> tuple[str, int | None]:
 def _is_job_url_for_board(board: str, url: str) -> bool:
     patterns = _JOB_URL_PATTERNS.get(board) or ()
     return any(pattern.search(url) for pattern in patterns)
+
+
+def _normalize_url_for_compare(url: str | None) -> str:
+    if not url:
+        return ""
+    parts = urlsplit(str(url).strip())
+    query = urlencode(sorted(parse_qsl(parts.query, keep_blank_values=True)))
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), query, ""))
+
+
+def _handshake_cookie_header() -> str | None:
+    cookie_header = str(os.getenv("HANDSHAKE_COOKIE_HEADER") or "").strip()
+    if cookie_header:
+        return cookie_header
+    session_cookie = str(os.getenv("HANDSHAKE_SESSION_COOKIE") or "").strip()
+    if not session_cookie:
+        return None
+    return session_cookie if "=" in session_cookie else f"_session_id={session_cookie}"
+
+
+def _handshake_session_headers() -> dict[str, str]:
+    cookie = _handshake_cookie_header()
+    return {"Cookie": cookie} if cookie else {}
+
+
+def _is_handshake_auth_url(url: str | None) -> bool:
+    if not url:
+        return False
+    low = urlsplit(url).path.lower()
+    return any(marker in low for marker in _HANDSHAKE_AUTH_PATH_MARKERS)
+
+
+def _is_handshake_search_url(url: str | None) -> bool:
+    if not url:
+        return False
+    low = urlsplit(url).path.lower()
+    return any(marker in low for marker in _HANDSHAKE_SEARCH_PATH_MARKERS)
+
+
+def _count_handshake_cards(html_text: str, *, base_url: str) -> int:
+    seen: set[str] = set()
+    for match in _HANDSHAKE_CARD_RE.finditer(html_text):
+        href = str(match.group("href") or "").strip()
+        if not href:
+            continue
+        url = absolute_url(base_url, unescape(href))
+        if _is_job_url_for_board("handshake", url):
+            seen.add(url)
+    return len(seen)
+
+
+def _handshake_page_diagnostics(
+    *,
+    requested_url: str,
+    final_url: str | None,
+    html_text: str,
+    status_code: int | None,
+    cards_seen: int,
+) -> dict[str, Any]:
+    final_value = str(final_url or "").strip() or requested_url
+    unexpected_redirect = bool(
+        final_value
+        and _normalize_url_for_compare(final_value) != _normalize_url_for_compare(requested_url)
+        and not _is_handshake_search_url(final_value)
+    )
+    login_wall = _is_handshake_auth_url(final_value) or any(pattern.search(html_text) for pattern in _HANDSHAKE_LOGIN_WALL_PATTERNS)
+    auth_required = bool(login_wall or status_code in {401, 403})
+    empty_results = any(pattern.search(html_text) for pattern in _HANDSHAKE_EMPTY_PATTERNS)
+    search_context = _is_handshake_search_url(requested_url) or any(
+        pattern.search(html_text) for pattern in _HANDSHAKE_SEARCH_CONTEXT_PATTERNS
+    )
+    layout_mismatch = bool(cards_seen == 0 and not empty_results and not auth_required and search_context)
+
+    source_status = "success"
+    source_error_type = None
+    page_state = "results"
+    if cards_seen <= 0:
+        if auth_required:
+            source_status = "auth_blocked"
+            page_state = "auth_blocked"
+            if unexpected_redirect and not login_wall:
+                source_error_type = "unexpected_redirect"
+            elif login_wall:
+                source_error_type = "login_wall"
+            else:
+                source_error_type = "auth_required"
+        elif unexpected_redirect:
+            source_status = "upstream_failure"
+            source_error_type = "unexpected_redirect"
+            page_state = "unexpected_redirect"
+        elif empty_results:
+            source_status = "empty_success"
+            source_error_type = "empty_results"
+            page_state = "empty_results"
+        elif layout_mismatch:
+            source_status = "layout_mismatch"
+            source_error_type = "selector_mismatch"
+            page_state = "selector_mismatch"
+        else:
+            source_status = "empty_success"
+            source_error_type = "no_cards_found"
+            page_state = "no_cards_found"
+
+    return {
+        "source_status": source_status,
+        "source_error_type": source_error_type,
+        "page_state": page_state,
+        "cards_seen": int(cards_seen),
+        "auth_required_detected": auth_required,
+        "login_wall_detected": login_wall,
+        "unexpected_redirect_detected": unexpected_redirect,
+        "layout_mismatch_detected": layout_mismatch,
+    }
+
+
+def _handshake_browser_fallback_enabled() -> bool:
+    return _env_flag("HANDSHAKE_USE_BROWSER_FALLBACK", default=False)
+
+
+def _fetch_handshake_browser_response(url: str, *, extra_headers: dict[str, str] | None = None) -> dict[str, Any] | None:
+    try:
+        module = import_module("integrations.handshake_browser_fallback")
+    except ImportError:
+        return None
+
+    fetcher = getattr(module, "fetch_handshake_page", None)
+    if not callable(fetcher):
+        return None
+
+    response = fetcher(url=url, extra_headers=extra_headers or {})
+    if isinstance(response, str):
+        return {
+            "html_text": response,
+            "final_url": url,
+            "status_code": None,
+            "from_cache": False,
+        }
+    if isinstance(response, dict):
+        return {
+            "html_text": str(response.get("html_text") or ""),
+            "final_url": str(response.get("final_url") or url),
+            "status_code": int(response.get("status_code")) if isinstance(response.get("status_code"), int) else None,
+            "from_cache": bool(response.get("from_cache", False)),
+        }
+    raise TypeError("fetch_handshake_page must return str or dict")
+
+
+def _handshake_status_priority(status: str) -> int:
+    return {
+        "empty_success": 1,
+        "upstream_failure": 2,
+        "layout_mismatch": 3,
+        "auth_blocked": 4,
+    }.get(status, 0)
+
+
+def _handshake_final_meta(
+    *,
+    jobs: list[dict[str, Any]],
+    discovered_raw_count: int,
+    pages_fetched: int,
+    pages_with_results: int,
+    request_attempts: list[dict[str, Any]],
+    request_urls_tried: list[str],
+    last_request_url: str | None,
+    stop_reason: str,
+    source_status: str,
+    source_error_type: str | None,
+    error_status: int | None,
+    cards_seen: int,
+    auth_required_detected: bool,
+    login_wall_detected: bool,
+    unexpected_redirect_detected: bool,
+    layout_mismatch_detected: bool,
+) -> dict[str, Any]:
+    return {
+        "discovered_raw_count": discovered_raw_count,
+        "pages_fetched": pages_fetched,
+        "pages_attempted": pages_fetched,
+        "pages_with_results": pages_with_results,
+        "request_attempts": request_attempts,
+        "request_urls_tried": request_urls_tried,
+        "last_request_url": last_request_url,
+        "error_type": source_error_type,
+        "source_error_type": source_error_type,
+        "error_status": error_status,
+        "stop_reason": stop_reason,
+        "source_status": source_status,
+        "cards_seen": cards_seen,
+        "jobs_raw": discovered_raw_count,
+        "jobs_kept": len(jobs),
+        "auth_required_detected": auth_required_detected,
+        "login_wall_detected": login_wall_detected,
+        "unexpected_redirect_detected": unexpected_redirect_detected,
+        "layout_mismatch_detected": layout_mismatch_detected,
+        "authenticated_session_supported": bool(_handshake_cookie_header()),
+        "browser_fallback_requested": _handshake_browser_fallback_enabled(),
+    }
+
+
+def _collect_jobs_from_handshake(
+    *,
+    query: str,
+    location: str,
+    max_jobs: int,
+    max_pages: int,
+    early_stop_when_no_new_results: bool,
+    url_override: str | None,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    board_key = "handshake"
+    base_url = _BOARD_BASE_URLS[board_key]
+    base_search_url = str(url_override or "").strip() or None
+    warnings: list[str] = []
+    jobs: list[dict[str, Any]] = []
+    seen_unique: set[tuple[str, str, str]] = set()
+    max_items = max(1, int(max_jobs))
+    max_page_count = max(1, int(max_pages))
+    pages_fetched = 0
+    pages_with_results = 0
+    discovered_raw_count = 0
+    stop_reason = "max_pages_reached"
+    request_attempts: list[dict[str, Any]] = []
+    request_urls_tried: list[str] = []
+    last_request_url: str | None = None
+    error_status: int | None = None
+    cards_seen_total = 0
+    auth_required_detected = False
+    login_wall_detected = False
+    unexpected_redirect_detected = False
+    layout_mismatch_detected = False
+    best_failure_status = "empty_success"
+    best_failure_error_type: str | None = "empty_results"
+
+    session_headers = _handshake_session_headers()
+    browser_fallback_enabled = _handshake_browser_fallback_enabled()
+
+    for page_index in range(max_page_count):
+        candidate_urls = (
+            [_page_url_for_board(board_key, search_url=base_search_url, page_index=page_index)]
+            if base_search_url
+            else _candidate_search_urls(board_key, query=query, location=location, page_index=page_index)
+        )
+        page_selected = False
+        page_max_cards_seen = 0
+
+        for candidate_index, candidate_url in enumerate(candidate_urls, start=1):
+            modes: list[tuple[str, dict[str, str], bool]] = [("http_anonymous", {}, False)]
+            if session_headers:
+                modes.append(("http_authenticated", dict(session_headers), False))
+            if browser_fallback_enabled:
+                modes.append(("browser_fallback", dict(session_headers), True))
+
+            for mode_index, (mode, mode_headers, use_browser) in enumerate(modes, start=1):
+                pages_fetched += 1
+                request_urls_tried.append(candidate_url)
+                last_request_url = candidate_url
+
+                try:
+                    if use_browser:
+                        response = _fetch_handshake_browser_response(candidate_url, extra_headers=mode_headers)
+                        if response is None:
+                            request_attempts.append(
+                                {
+                                    "page_index": page_index + 1,
+                                    "candidate_index": candidate_index,
+                                    "mode_index": mode_index,
+                                    "mode": mode,
+                                    "url": candidate_url,
+                                    "status": "error",
+                                    "error_type": "browser_fallback_unavailable",
+                                }
+                            )
+                            continue
+                    else:
+                        response = fetch_html_response(
+                            candidate_url,
+                            **_request_options_for_board_with_headers(
+                                board_key,
+                                search_url=candidate_url,
+                                extra_headers=mode_headers,
+                                cache_ttl_seconds=0 if mode_headers.get("Cookie") else None,
+                            ),
+                        )
+
+                    html_text = str(response.get("html_text") or "")
+                    final_url = str(response.get("final_url") or candidate_url)
+                    status_code = response.get("status_code") if isinstance(response.get("status_code"), int) else None
+                    cards_seen = _count_handshake_cards(html_text, base_url=base_url)
+                    page_max_cards_seen = max(page_max_cards_seen, cards_seen)
+                    page_diag = _handshake_page_diagnostics(
+                        requested_url=candidate_url,
+                        final_url=final_url,
+                        html_text=html_text,
+                        status_code=status_code,
+                        cards_seen=cards_seen,
+                    )
+                    page_jobs: list[dict[str, Any]] = []
+                    if page_diag["source_status"] == "success":
+                        page_jobs = _extract_jobs_from_html(
+                            board_key,
+                            html_text=html_text,
+                            base_url=base_url,
+                            search_url=final_url,
+                            location=location,
+                        )
+                        if not page_jobs:
+                            page_diag.update(
+                                {
+                                    "source_status": "layout_mismatch",
+                                    "source_error_type": "selector_mismatch",
+                                    "page_state": "selector_mismatch",
+                                    "layout_mismatch_detected": True,
+                                }
+                            )
+
+                    auth_required_detected = auth_required_detected or bool(page_diag["auth_required_detected"])
+                    login_wall_detected = login_wall_detected or bool(page_diag["login_wall_detected"])
+                    unexpected_redirect_detected = unexpected_redirect_detected or bool(page_diag["unexpected_redirect_detected"])
+                    layout_mismatch_detected = layout_mismatch_detected or bool(page_diag["layout_mismatch_detected"])
+                    if _handshake_status_priority(str(page_diag["source_status"])) >= _handshake_status_priority(best_failure_status):
+                        best_failure_status = str(page_diag["source_status"])
+                        best_failure_error_type = str(page_diag.get("source_error_type") or "").strip() or None
+
+                    request_attempts.append(
+                        {
+                            "page_index": page_index + 1,
+                            "candidate_index": candidate_index,
+                            "mode_index": mode_index,
+                            "mode": mode,
+                            "url": candidate_url,
+                            "final_url": final_url,
+                            "status": "ok",
+                            "response_status": status_code,
+                            "cards_seen": int(page_diag["cards_seen"]),
+                            "page_state": page_diag["page_state"],
+                            "source_status": page_diag["source_status"],
+                            "source_error_type": page_diag["source_error_type"],
+                            "auth_required_detected": bool(page_diag["auth_required_detected"]),
+                            "login_wall_detected": bool(page_diag["login_wall_detected"]),
+                            "unexpected_redirect_detected": bool(page_diag["unexpected_redirect_detected"]),
+                            "layout_mismatch_detected": bool(page_diag["layout_mismatch_detected"]),
+                        }
+                    )
+
+                    if page_diag["source_status"] == "success":
+                        discovered_raw_count += len(page_jobs)
+                        if page_jobs:
+                            pages_with_results += 1
+                        jobs.extend(page_jobs)
+                        new_unique = 0
+                        for row in page_jobs:
+                            key = _job_key(row)
+                            if key in seen_unique:
+                                continue
+                            seen_unique.add(key)
+                            new_unique += 1
+                        page_selected = True
+                        if len(jobs) >= max_items:
+                            stop_reason = "max_jobs_reached"
+                            jobs = jobs[:max_items]
+                            cards_seen_total += page_max_cards_seen
+                            return jobs, warnings, _handshake_final_meta(
+                                jobs=jobs,
+                                discovered_raw_count=discovered_raw_count,
+                                pages_fetched=pages_fetched,
+                                pages_with_results=pages_with_results,
+                                request_attempts=request_attempts,
+                                request_urls_tried=request_urls_tried,
+                                last_request_url=last_request_url,
+                                stop_reason=stop_reason,
+                                source_status="success",
+                                source_error_type=None,
+                                error_status=error_status,
+                                cards_seen=cards_seen_total,
+                                auth_required_detected=auth_required_detected,
+                                login_wall_detected=login_wall_detected,
+                                unexpected_redirect_detected=unexpected_redirect_detected,
+                                layout_mismatch_detected=layout_mismatch_detected,
+                            )
+                        if early_stop_when_no_new_results and new_unique == 0:
+                            stop_reason = "no_new_results"
+                        else:
+                            stop_reason = "page_results"
+                        break
+
+                    if page_diag["source_status"] == "empty_success":
+                        page_selected = True
+                        stop_reason = page_diag["page_state"]
+                        break
+                except Exception as exc:
+                    error_type, error_status = _error_details(exc)
+                    if _handshake_status_priority("upstream_failure") >= _handshake_status_priority(best_failure_status):
+                        best_failure_status = "upstream_failure"
+                        best_failure_error_type = error_type
+                    request_attempts.append(
+                        {
+                            "page_index": page_index + 1,
+                            "candidate_index": candidate_index,
+                            "mode_index": mode_index,
+                            "mode": mode,
+                            "url": candidate_url,
+                            "status": "error",
+                            "error_type": error_type,
+                            "error_status": error_status,
+                        }
+                    )
+                    continue
+
+            if page_selected:
+                break
+
+        cards_seen_total += page_max_cards_seen
+        if page_selected and stop_reason in {"empty_results", "no_cards_found"}:
+            break
+        if stop_reason == "no_new_results":
+            break
+
+    final_status = "success" if jobs else best_failure_status
+    final_error_type = None if jobs else best_failure_error_type
+    if not jobs and final_status == "empty_success":
+        warnings.append(f"{board_key}: empty_success")
+    elif not jobs and final_status in {"auth_blocked", "layout_mismatch", "upstream_failure"}:
+        warnings.append(
+            f"{board_key}: {final_status}"
+            + (f" error_type={final_error_type}" if final_error_type else "")
+        )
+
+    return jobs, warnings, _handshake_final_meta(
+        jobs=jobs,
+        discovered_raw_count=discovered_raw_count,
+        pages_fetched=pages_fetched,
+        pages_with_results=pages_with_results,
+        request_attempts=request_attempts,
+        request_urls_tried=request_urls_tried,
+        last_request_url=last_request_url,
+        stop_reason=stop_reason if jobs or final_status == "empty_success" else final_status,
+        source_status=final_status,
+        source_error_type=final_error_type,
+        error_status=error_status,
+        cards_seen=cards_seen_total,
+        auth_required_detected=auth_required_detected,
+        login_wall_detected=login_wall_detected,
+        unexpected_redirect_detected=unexpected_redirect_detected,
+        layout_mismatch_detected=layout_mismatch_detected,
+    )
 
 
 def _dedupe_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -515,8 +1021,25 @@ def collect_jobs_from_board(
             "discovered_raw_count": 0,
             "pages_fetched": 0,
             "pages_with_results": 0,
+            "pages_attempted": 0,
+            "source_status": "upstream_failure",
+            "source_error_type": "unsupported_board",
+            "jobs_raw": 0,
+            "jobs_kept": 0,
+            "cards_seen": 0,
+            "auth_required_detected": False,
+            "login_wall_detected": False,
             "stop_reason": "unsupported_board",
         }
+    if board_key == "handshake":
+        return _collect_jobs_from_handshake(
+            query=query,
+            location=location,
+            max_jobs=max_jobs,
+            max_pages=max_pages,
+            early_stop_when_no_new_results=early_stop_when_no_new_results,
+            url_override=url_override,
+        )
 
     base_url = _BOARD_BASE_URLS[board_key]
     base_search_url = str(url_override or "").strip() or None
@@ -590,7 +1113,16 @@ def collect_jobs_from_board(
                 "request_urls_tried": request_urls_tried,
                 "last_request_url": last_request_url,
                 "error_type": error_type,
+                "source_error_type": error_type,
                 "error_status": error_status,
+                "source_status": "upstream_failure",
+                "cards_seen": 0,
+                "jobs_raw": discovered_raw_count,
+                "jobs_kept": len(jobs),
+                "auth_required_detected": False,
+                "login_wall_detected": False,
+                "unexpected_redirect_detected": False,
+                "layout_mismatch_detected": False,
                 "stop_reason": stop_reason,
             }
 
@@ -635,7 +1167,16 @@ def collect_jobs_from_board(
         "request_urls_tried": request_urls_tried,
         "last_request_url": last_request_url,
         "error_type": error_type,
+        "source_error_type": "no_jobs_found" if not jobs and error_type is None else error_type,
         "error_status": error_status,
+        "source_status": "success" if jobs else "empty_success",
+        "cards_seen": discovered_raw_count,
+        "jobs_raw": discovered_raw_count,
+        "jobs_kept": len(jobs),
+        "auth_required_detected": False,
+        "login_wall_detected": False,
+        "unexpected_redirect_detected": False,
+        "layout_mismatch_detected": False,
         "stop_reason": stop_reason,
     }
 

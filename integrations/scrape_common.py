@@ -235,3 +235,90 @@ def fetch_html(
     if last_error is not None:
         raise last_error
     raise RuntimeError(f"fetch_html failed for URL '{url}'")
+
+
+def fetch_html_response(
+    url: str,
+    *,
+    timeout_seconds: float | None = None,
+    cache_ttl_seconds: int | None = None,
+    rate_limit_seconds: float | None = None,
+    retry_attempts: int | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    timeout = timeout_seconds if timeout_seconds is not None else _env_float(
+        "SCRAPE_TIMEOUT_SECONDS",
+        DEFAULT_SCRAPE_TIMEOUT_SECONDS,
+    )
+    cache_ttl = cache_ttl_seconds if cache_ttl_seconds is not None else _env_int(
+        "SCRAPE_CACHE_TTL_SECONDS",
+        DEFAULT_SCRAPE_CACHE_TTL_SECONDS,
+    )
+    rate_limit = rate_limit_seconds if rate_limit_seconds is not None else _env_float(
+        "SCRAPE_RATE_LIMIT_SECONDS",
+        DEFAULT_SCRAPE_RATE_LIMIT_SECONDS,
+    )
+    attempts = retry_attempts if retry_attempts is not None else _env_int(
+        "SCRAPE_RETRY_ATTEMPTS",
+        DEFAULT_SCRAPE_RETRY_ATTEMPTS,
+    )
+    attempts = max(int(attempts), 1)
+
+    if cache_ttl > 0:
+        with _CACHE_LOCK:
+            cached = _HTML_CACHE.get(url)
+            if cached:
+                expires_at, html_text = cached
+                if expires_at >= time.time():
+                    return {
+                        "html_text": html_text,
+                        "final_url": url,
+                        "status_code": None,
+                        "from_cache": True,
+                    }
+                del _HTML_CACHE[url]
+
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    request = Request(url=url, headers=headers)
+
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        _respect_rate_limit(rate_limit)
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                raw = response.read()
+                charset = response.headers.get_content_charset() or "utf-8"
+                html_text = raw.decode(charset, errors="replace")
+                final_url = response.geturl()
+                status_code = getattr(response, "status", None) or response.getcode()
+                if cache_ttl > 0:
+                    with _CACHE_LOCK:
+                        _HTML_CACHE[url] = (time.time() + float(cache_ttl), html_text)
+                return {
+                    "html_text": html_text,
+                    "final_url": final_url,
+                    "status_code": int(status_code) if status_code is not None else None,
+                    "from_cache": False,
+                }
+        except HTTPError as exc:
+            last_error = exc
+            if exc.code in TRANSIENT_HTTP_CODES and attempt < attempts - 1:
+                time.sleep(min(2 ** attempt, 8))
+                continue
+            raise
+        except (URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(min(2 ** attempt, 8))
+                continue
+            raise
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"fetch_html_response failed for URL '{url}'")
