@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -12,9 +13,11 @@ from models.catalog import get_model_info, get_model_price, tier_model
 from task_handlers.jobs_normalize_helpers import metadata_quality_details
 from task_handlers.jobs_pipeline_common import (
     build_upstream_ref,
+    deterministic_job_signals,
     expect_artifact_type,
     fetch_upstream_result_content_json,
     fit_tier,
+    is_broad_discovery_request,
     matches_filters,
     new_pipeline_id,
     payload_object,
@@ -39,6 +42,24 @@ DEFAULT_LLM_RETRY_COST_CAP_USD = Decimal("0.00300000")
 STRICT_LLM_RETRY_COST_CAP_USD = Decimal("0.00600000")
 MAX_LLM_RETRY_COST_CAP_USD = Decimal("0.10000000")
 _SCORING_OUTPUT_VALIDATOR = Draft7Validator(SCORING_OUTPUT_SCHEMA)
+_RESUME_OVERLAP_STOPWORDS = {
+    "with",
+    "from",
+    "that",
+    "this",
+    "into",
+    "your",
+    "their",
+    "have",
+    "using",
+    "build",
+    "built",
+    "role",
+    "team",
+    "work",
+    "years",
+    "year",
+}
 
 
 def _round(value: float, ndigits: int = 4) -> float:
@@ -63,6 +84,63 @@ def _as_non_negative_int(value: Any) -> int | None:
     if parsed < 0:
         return None
     return parsed
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _job_age_days(posted_at: Any, *, now_utc: datetime | None = None) -> int | None:
+    posted = _parse_datetime(posted_at)
+    if posted is None:
+        return None
+    now = now_utc or datetime.now(timezone.utc)
+    delta = now - posted
+    return max(int(delta.total_seconds() // 86400), 0)
+
+
+def _prefer_recent_enabled(request: dict[str, Any]) -> bool:
+    if bool(request.get("prefer_recent")):
+        return True
+    freshness = str(request.get("shortlist_freshness_preference") or "").strip().lower()
+    return freshness in {"prefer_recent", "strong_prefer_recent"}
+
+
+def _recency_details(
+    row: dict[str, Any],
+    *,
+    request: dict[str, Any],
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    age_days = _job_age_days(row.get("posted_at"), now_utc=now_utc)
+    prefer_recent = _prefer_recent_enabled(request)
+    if age_days is None:
+        return {
+            "age_days": None,
+            "recency_score": 0.0,
+            "missing_posted_at_penalty": 20.0,
+            "old_job_penalty": 0.0,
+        }
+    return {
+        "age_days": age_days,
+        "recency_score": _bounded_score(max(0.0, 100.0 - age_days * 5.0)),
+        "missing_posted_at_penalty": 0.0,
+        "old_job_penalty": float(age_days * 2) if prefer_recent and age_days > 14 else 0.0,
+    }
 
 
 def _short_summary(text: Any, max_chars: int = 180) -> str:
@@ -129,6 +207,29 @@ def _pre_llm_priority(job: dict[str, Any], request: dict[str, Any]) -> tuple[flo
         quality_score,
         float(job.get("salary_max") or job.get("salary_min") or 0.0),
     )
+
+
+def _token_set(value: Any) -> set[str]:
+    return {
+        token
+        for token in _canonical_text(value).split()
+        if len(token) >= 3 and token not in _RESUME_OVERLAP_STOPWORDS and not token.isdigit()
+    }
+
+
+def _resume_overlap_ratio(job: dict[str, Any], profile_context: dict[str, Any]) -> float:
+    resume_text = profile_context.get("resume_text")
+    if not isinstance(resume_text, str) or not resume_text.strip():
+        return 0.0
+    resume_tokens = _token_set(resume_text)
+    if not resume_tokens:
+        return 0.0
+    job_tokens = _token_set(" ".join(str(job.get(key) or "") for key in ("title", "description_snippet", "company")))
+    if not job_tokens:
+        return 0.0
+    overlap = len(job_tokens.intersection(resume_tokens))
+    denominator = max(min(len(job_tokens), 12), 1)
+    return min(overlap / float(denominator), 1.0)
 
 
 def _llm_runtime_enabled() -> bool:
@@ -259,30 +360,93 @@ def _iter_batches(jobs: list[dict[str, Any]], size: int) -> list[list[dict[str, 
     return [jobs[idx : idx + size] for idx in range(0, len(jobs), size)]
 
 
-def _fallback_scores(job: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
-    deterministic = float(score_job(job, request))
-    score_100 = max(0.0, min(deterministic / 2.0 * 100.0, 100.0))
+def _fallback_scores(job: dict[str, Any], request: dict[str, Any], profile_context: dict[str, Any]) -> dict[str, Any]:
+    signals = deterministic_job_signals(job, request)
+    resume_overlap = _resume_overlap_ratio(job, profile_context)
+    broad_discovery = bool(signals.get("broad_discovery"))
+    scaling_denominator = 2.8 if broad_discovery else 2.6
+    recency_details = _recency_details(job, request=request)
+    recency_score = float(recency_details.get("recency_score") or 0.0)
+    deterministic = float(signals.get("score") or score_job(job, request))
+    score_100 = max(0.0, min(deterministic / scaling_denominator * 100.0, 100.0))
+    metadata_score = float(signals.get("metadata_quality_score") or 0.0)
+    metadata_norm = max(0.0, min(metadata_score / 100.0, 1.0))
+    title_signal = float(signals.get("title_signal") or 0.0)
+    keyword_signal = float(signals.get("keyword_signal") or 0.0)
+    salary_signal = float(signals.get("salary_signal") or 0.0)
+    work_mode_signal = float(signals.get("work_mode_signal") or 0.0)
+    experience_signal = float(signals.get("experience_signal") or 0.0)
+    has_direct_source_url = bool(signals.get("has_direct_source_url"))
+    inferred_experience = str(signals.get("inferred_experience_level") or "").strip().lower()
+
+    title_match_score = _bounded_score(
+        18.0
+        + title_signal * 34.0
+        + keyword_signal * 18.0
+        + (8.0 if broad_discovery and int(signals.get("title_family_hits") or 0) > 0 else 0.0)
+    )
+    resume_match_score = _bounded_score(16.0 + score_100 * 0.24 + title_match_score * 0.16 + resume_overlap * 48.0 + metadata_norm * 8.0)
+    salary_score = _bounded_score(10.0 + salary_signal * 100.0 + metadata_norm * 10.0 + (6.0 if has_direct_source_url else 0.0))
+    location_score = _bounded_score(14.0 + work_mode_signal * 210.0 + metadata_norm * 8.0)
+    seniority_score = _bounded_score(
+        12.0 + experience_signal * 220.0 + (8.0 if broad_discovery and inferred_experience == "entry" else 0.0)
+    )
+    weighted_overall = _weighted_overall(
+        {
+            "resume_match_score": resume_match_score,
+            "title_match_score": title_match_score,
+            "salary_score": salary_score,
+            "location_score": location_score,
+            "seniority_score": seniority_score,
+            "recency_score": recency_score,
+        }
+    )
+    overall_score = _bounded_score(
+        max(score_100, weighted_overall)
+        - float(recency_details.get("missing_posted_at_penalty") or 0.0)
+        - float(recency_details.get("old_job_penalty") or 0.0)
+    )
+    scoring_mode = "deterministic_broad_discovery" if broad_discovery else "deterministic_fallback"
+    explanation = (
+        "Deterministic broad-discovery ranking used after LLM scoring was unavailable; score reflects title-family, work-mode, experience, resume, and metadata signals."
+        if broad_discovery
+        else "Deterministic fallback ranking used after LLM scoring was unavailable; score reflects title, work-mode, resume, and metadata signals."
+    )
     return {
-        "resume_match_score": _round(score_100 * 0.85, 2),
-        "title_match_score": _round(score_100 * 0.95, 2),
-        "salary_score": _round(score_100 * 0.80, 2),
-        "location_score": _round(score_100 * 0.75, 2),
-        "seniority_score": _round(score_100 * 0.70, 2),
-        "overall_score": _round(score_100, 2),
-        "explanation": "Fallback deterministic score used; LLM score unavailable.",
-        "explanation_summary": "Deterministic fallback score.",
-        "scoring_mode": "deterministic_fallback",
+        "resume_match_score": _round(resume_match_score, 2),
+        "title_match_score": _round(title_match_score, 2),
+        "salary_score": _round(salary_score, 2),
+        "location_score": _round(location_score, 2),
+        "seniority_score": _round(seniority_score, 2),
+        "recency_score": _round(recency_score, 2),
+        "overall_score": _round(overall_score, 2),
+        "explanation": explanation,
+        "explanation_summary": _short_summary(explanation, 140),
+        "scoring_mode": scoring_mode,
+        "deterministic_signals": {
+            "broad_discovery": broad_discovery,
+            "resume_overlap_ratio": _round(resume_overlap, 4),
+            "title_family_hits": int(signals.get("title_family_hits") or 0),
+            "title_exact_hits": int(signals.get("title_exact_hits") or 0),
+            "keyword_hits": int(signals.get("keyword_hits") or 0),
+            "inferred_work_mode": signals.get("inferred_work_mode"),
+            "inferred_experience_level": signals.get("inferred_experience_level"),
+            "metadata_quality_score": _round(metadata_score, 2),
+            "has_direct_source_url": has_direct_source_url,
+            "age_days": recency_details.get("age_days"),
+        },
     }
 
 
 def _weighted_overall(score_row: dict[str, Any]) -> float:
     return _round(
         (
-            float(score_row.get("resume_match_score") or 0.0) * 0.35
-            + float(score_row.get("title_match_score") or 0.0) * 0.22
-            + float(score_row.get("salary_score") or 0.0) * 0.15
-            + float(score_row.get("location_score") or 0.0) * 0.14
-            + float(score_row.get("seniority_score") or 0.0) * 0.14
+            float(score_row.get("resume_match_score") or 0.0) * 0.30
+            + float(score_row.get("title_match_score") or 0.0) * 0.20
+            + float(score_row.get("salary_score") or 0.0) * 0.12
+            + float(score_row.get("location_score") or 0.0) * 0.13
+            + float(score_row.get("seniority_score") or 0.0) * 0.12
+            + float(score_row.get("recency_score") or 0.0) * 0.13
         ),
         2,
     )
@@ -463,8 +627,15 @@ def _apply_diversity_controls(scored_jobs: list[dict[str, Any]]) -> list[dict[st
         source_ratio = source_totals.get(source, 1) / float(total)
         source_penalty = 2.5 if source_ratio > 0.5 and source_count > 0 else 0.0
         source_bonus = max(0.0, (1.0 - source_ratio) * 2.0)
-        low_signal_penalty = 4.0 if len(str(entry.get("explanation_summary") or "")) < 30 else 0.0
-        metadata_quality_penalty = float(entry.get("metadata_quality_penalty") or 0.0)
+        scoring_mode = str(entry.get("scoring_mode") or "").strip().lower()
+        low_signal_penalty = 0.0 if scoring_mode.startswith("deterministic_") else 4.0 if len(str(entry.get("explanation_summary") or "")) < 30 else 0.0
+        metadata_quality_penalty_raw = float(entry.get("metadata_quality_penalty") or 0.0)
+        if scoring_mode == "deterministic_broad_discovery":
+            metadata_quality_penalty = min(metadata_quality_penalty_raw * 0.35, 4.0)
+        elif scoring_mode == "deterministic_fallback":
+            metadata_quality_penalty = min(metadata_quality_penalty_raw * 0.6, 7.0)
+        else:
+            metadata_quality_penalty = metadata_quality_penalty_raw
 
         adjusted_100 = (
             float(entry.get("overall_score") or 0.0)
@@ -484,6 +655,7 @@ def _apply_diversity_controls(scored_jobs: list[dict[str, Any]]) -> list[dict[st
             "source_bonus": _round(source_bonus, 2),
             "low_signal_penalty": _round(low_signal_penalty, 2),
             "metadata_quality_penalty": _round(metadata_quality_penalty, 2),
+            "metadata_quality_penalty_raw": _round(metadata_quality_penalty_raw, 2),
         }
         entry["overall_score_adjusted"] = _round(adjusted_100, 2)
         entry["score"] = _round(adjusted_100 / 50.0, 4)
@@ -642,6 +814,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
     llm_attempt_errors: list[dict[str, Any]] = []
     llm_batch_stop_reasons: list[str] = []
     llm_attempts_total = 0
+    now_utc = datetime.now(timezone.utc)
 
     if runtime_llm and prepared_jobs:
         batches = _iter_batches(prepared_jobs, llm_batch_size)
@@ -708,16 +881,26 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
 
         llm_score = llm_scores_by_id.get(job_id)
         if llm_score is None:
-            fallback = _fallback_scores(row, request)
+            fallback = _fallback_scores(row, request, profile_context)
             llm_score = fallback
             if runtime_llm:
                 llm_warnings.append(f"llm_missing_score_for_job:{job_id}")
 
-        computed_overall = _weighted_overall(llm_score)
+        recency_details = _recency_details(row, request=request, now_utc=now_utc)
+        recency_score = float(llm_score.get("recency_score") or recency_details.get("recency_score") or 0.0)
+        computed_overall = _weighted_overall({**llm_score, "recency_score": recency_score})
         overall_raw = float(llm_score.get("overall_score") or computed_overall)
         if overall_raw <= 0:
             overall_raw = computed_overall
-        overall_raw = _bounded_score(overall_raw)
+        elif job_id in llm_scores_by_id:
+            overall_raw = _bounded_score(overall_raw * 0.88 + recency_score * 0.12)
+        else:
+            overall_raw = _bounded_score(max(overall_raw, computed_overall))
+        overall_raw = _bounded_score(
+            overall_raw
+            - float(recency_details.get("missing_posted_at_penalty") or 0.0)
+            - float(recency_details.get("old_job_penalty") or 0.0)
+        )
         quality_details, quality_penalty = _metadata_quality_penalty(row)
 
         row.update(
@@ -727,10 +910,23 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 "salary_score": _bounded_score(llm_score.get("salary_score")),
                 "location_score": _bounded_score(llm_score.get("location_score")),
                 "seniority_score": _bounded_score(llm_score.get("seniority_score")),
+                "recency_score": _round(recency_score, 2),
+                "age_days": recency_details.get("age_days"),
+                "missing_posted_at_penalty": _round(float(recency_details.get("missing_posted_at_penalty") or 0.0), 2),
+                "old_job_penalty": _round(float(recency_details.get("old_job_penalty") or 0.0), 2),
                 "overall_score": _round(overall_raw, 2),
                 "explanation": _short_summary(llm_score.get("explanation"), 220),
                 "explanation_summary": _short_summary(llm_score.get("explanation_summary") or llm_score.get("explanation"), 140),
-                "scoring_mode": str(llm_score.get("scoring_mode") or ("llm_structured" if job_id in llm_scores_by_id else "deterministic_fallback")),
+                "scoring_mode": str(
+                    llm_score.get("scoring_mode")
+                    or (
+                        "llm_structured"
+                        if job_id in llm_scores_by_id
+                        else "deterministic_broad_discovery"
+                        if is_broad_discovery_request(request)
+                        else "deterministic_fallback"
+                    )
+                ),
                 "metadata_quality_score": float(quality_details.get("metadata_quality_score") or 0.0),
                 "missing_company": bool(quality_details.get("missing_company")),
                 "missing_source_url": bool(quality_details.get("missing_source_url")),
@@ -744,7 +940,10 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         scored_jobs.append(row)
 
     ranked_jobs = _apply_diversity_controls(scored_jobs)
-    fallback_used = any(str(row.get("scoring_mode") or "") == "deterministic_fallback" for row in ranked_jobs)
+    fallback_used = any(
+        str(row.get("scoring_mode") or "") in {"deterministic_fallback", "deterministic_broad_discovery"}
+        for row in ranked_jobs
+    )
     for idx, job in enumerate(ranked_jobs, start=1):
         score_scaled = float(job.get("score") or 0.0)
         job["rank"] = idx
@@ -797,11 +996,12 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "request": request,
         "rank_policy": {
             "weights": rank_policy.get("weights") if isinstance(rank_policy.get("weights"), dict) else {
-                "resume_match_score": 0.35,
-                "title_match_score": 0.22,
-                "salary_score": 0.15,
-                "location_score": 0.14,
-                "seniority_score": 0.14,
+                "resume_match_score": 0.30,
+                "title_match_score": 0.20,
+                "salary_score": 0.12,
+                "location_score": 0.13,
+                "seniority_score": 0.12,
+                "recency_score": 0.13,
             },
             "max_ranked": max_ranked,
             "llm_enabled": llm_enabled,

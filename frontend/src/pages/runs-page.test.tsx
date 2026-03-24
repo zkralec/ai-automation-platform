@@ -117,6 +117,7 @@ describe("RunsPage", () => {
       artifact_type: "result.json",
       created_at: "2026-03-11T00:00:00Z",
       content_json: {
+        request: { search_mode: "broad_discovery" },
         collection_observability: {
           waterfall: {
             raw_jobs_discovered: 220,
@@ -165,6 +166,7 @@ describe("RunsPage", () => {
     expect(screen.getAllByText("linkedin").length).toBeGreaterThan(0);
     expect(screen.getAllByText("120 raw -> 100 kept").length).toBeGreaterThan(0);
     expect(screen.getAllByText("company 46%, post date 71%").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/broad discovery/i).length).toBeGreaterThan(0);
   });
 
   it("supports task_id deep links and shows shortlist resurfacing summary", () => {
@@ -248,6 +250,7 @@ describe("RunsPage", () => {
       artifact_type: "result.json",
       created_at: "2026-03-13T00:05:00Z",
       content_json: {
+        search_mode: "precision_match",
         summary: "Strong backend fit with two clear options.",
         generation_mode: "llm_primary",
         pipeline_counts: { shortlisted_count: 2 },
@@ -276,5 +279,6 @@ describe("RunsPage", () => {
     expect(screen.getAllByText("shortlist_non_empty").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: "https://example.com/jobs/1" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("link", { name: /Inspect Digest Artifact/i }).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/precision match/i).length).toBeGreaterThan(0);
   });
 });

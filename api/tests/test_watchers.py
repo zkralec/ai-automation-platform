@@ -199,6 +199,7 @@ def test_jobs_watcher_includes_compact_workflow_summary() -> None:
                     {
                         "pipeline_id": pipeline_id,
                         "request": {
+                            "search_mode": "broad_discovery",
                             "enabled_sources": ["linkedin", "indeed"],
                             "result_limit_per_source": 250,
                         },
@@ -383,6 +384,7 @@ def test_jobs_watcher_includes_compact_workflow_summary() -> None:
         payload = watcher_response.json()
         workflow_summary = payload["workflow_summary"]
         assert workflow_summary["kind"] == "jobs_watcher"
+        assert workflow_summary["search_mode"] == "broad_discovery"
         assert workflow_summary["counts"]["raw_jobs_found"] == 420
         assert workflow_summary["counts"]["jobs_after_filtering"] == 310
         assert workflow_summary["counts"]["jobs_after_dedupe"] == 180

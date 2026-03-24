@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -160,6 +161,7 @@ def test_jobs_rank_v1_llm_scoring_outputs_structured_fields(monkeypatch) -> None
         "pipeline_id": "pipe-rank-1",
         "upstream": {"task_id": "norm-task", "run_id": "norm-run", "task_type": "jobs_normalize_v1"},
         "request": {
+            "search_mode": "broad_discovery",
             "titles": ["machine learning engineer"],
             "locations": ["Remote", "New York, NY"],
             "work_mode_preference": ["remote", "hybrid"],
@@ -564,6 +566,105 @@ def test_jobs_rank_v1_penalizes_low_quality_metadata(monkeypatch) -> None:
     assert ranked[0]["overall_score_adjusted"] > ranked[1]["overall_score_adjusted"]
 
 
+def test_jobs_rank_v1_prefers_recent_jobs_and_penalizes_missing_posted_at(monkeypatch) -> None:
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    recent_posted_at = (now_utc - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    older_posted_at = (now_utc - timedelta(days=18)).isoformat().replace("+00:00", "Z")
+
+    monkeypatch.setenv("USE_LLM", "false")
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.normalize.v1",
+            "normalized_jobs": [
+                {
+                    "normalized_job_id": "recent",
+                    "title": "Machine Learning Engineer",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "work_mode": "remote",
+                    "source": "linkedin",
+                    "source_url": "https://www.linkedin.com/jobs/view/1",
+                    "source_url_kind": "direct",
+                    "posted_at": recent_posted_at,
+                    "description_snippet": "Remote ML systems role.",
+                    "salary_min": 180000,
+                    "salary_max": 200000,
+                    "metadata_quality_score": 96,
+                },
+                {
+                    "normalized_job_id": "older",
+                    "title": "Machine Learning Engineer",
+                    "company": "Beta",
+                    "location": "Remote",
+                    "work_mode": "remote",
+                    "source": "indeed",
+                    "source_url": "https://www.indeed.com/viewjob?jk=older",
+                    "source_url_kind": "direct",
+                    "posted_at": older_posted_at,
+                    "description_snippet": "Remote ML systems role.",
+                    "salary_min": 180000,
+                    "salary_max": 200000,
+                    "metadata_quality_score": 96,
+                },
+                {
+                    "normalized_job_id": "missing",
+                    "title": "Machine Learning Engineer",
+                    "company": "Gamma",
+                    "location": "Remote",
+                    "work_mode": "remote",
+                    "source": "glassdoor",
+                    "source_url": "https://www.glassdoor.com/partner/jobListing.htm?pos=1",
+                    "source_url_kind": "direct",
+                    "posted_at": None,
+                    "description_snippet": "Remote ML systems role.",
+                    "salary_min": 180000,
+                    "salary_max": 200000,
+                    "metadata_quality_score": 96,
+                    "missing_posted_at": True,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "resolve_profile_context",
+        lambda request: {
+            "enabled": False,
+            "applied": False,
+            "source": "none",
+            "resume_name": None,
+            "updated_at": None,
+            "resume_char_count": 0,
+            "resume_sent_char_count": 0,
+            "resume_truncated": False,
+            "resume_text": "",
+        },
+    )
+
+    result = jobs_rank_v1.execute(
+        _task(
+            {
+                "pipeline_id": "pipe-rank-recency",
+                "upstream": {"task_id": "norm-task", "run_id": "norm-run", "task_type": "jobs_normalize_v1"},
+                "request": {"titles": ["machine learning engineer"]},
+                "rank_policy": {"llm_enabled": False},
+            }
+        ),
+        db=object(),
+    )
+    ranked = result["content_json"]["ranked_jobs"]
+
+    assert [row["job_id"] for row in ranked] == ["recent", "older", "missing"]
+    assert ranked[0]["recency_score"] > ranked[1]["recency_score"] > ranked[2]["recency_score"]
+    assert ranked[0]["age_days"] == 1
+    assert ranked[1]["age_days"] == 18
+    assert ranked[2]["age_days"] is None
+    assert ranked[2]["missing_posted_at_penalty"] == 20.0
+    assert ranked[0]["overall_score_adjusted"] > ranked[1]["overall_score_adjusted"] > ranked[2]["overall_score_adjusted"]
+
+
 def test_jobs_rank_v1_strict_mode_raises_when_llm_malformed_all_retries(monkeypatch) -> None:
     monkeypatch.setenv("USE_LLM", "true")
     monkeypatch.setattr(
@@ -684,6 +785,129 @@ def test_jobs_rank_v1_non_strict_default_falls_back_when_llm_batches_fail(monkey
 
     assert len(artifact["ranked_jobs"]) == 1
     assert artifact["ranked_jobs"][0]["scoring_mode"] == "deterministic_fallback"
+    warnings = artifact.get("warnings") or []
+    assert any("llm_batch_1_failed" in row for row in warnings)
+
+
+def test_jobs_rank_v1_broad_discovery_fallback_keeps_plausible_jobs_scored(monkeypatch) -> None:
+    monkeypatch.setenv("USE_LLM", "true")
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.normalize.v1",
+            "normalized_jobs": [
+                {
+                    "normalized_job_id": "b1",
+                    "title": "Junior Backend Engineer",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "work_mode": "remote",
+                    "experience_level": None,
+                    "source": "linkedin",
+                    "source_url": "https://www.linkedin.com/jobs/view/1",
+                    "source_url_kind": "direct",
+                    "posted_at": "2026-03-22T00:00:00Z",
+                    "description_snippet": "New grad friendly backend role building Python APIs and distributed systems.",
+                    "salary_min": 120000,
+                    "salary_max": 145000,
+                    "metadata_quality_score": 96,
+                },
+                {
+                    "normalized_job_id": "b2",
+                    "title": "Software Developer",
+                    "company": "Beta",
+                    "location": "Hybrid, New York, NY",
+                    "work_mode": "hybrid",
+                    "source": "indeed",
+                    "source_url": "https://www.indeed.com/viewjob?jk=22",
+                    "source_url_kind": "direct",
+                    "posted_at": "2026-03-21T00:00:00Z",
+                    "description_snippet": "Backend-heavy software developer role with Python services and APIs.",
+                    "salary_min": 115000,
+                    "salary_max": 138000,
+                    "metadata_quality_score": 90,
+                },
+                {
+                    "normalized_job_id": "b3",
+                    "title": "Software Engineer I",
+                    "company": "Gamma",
+                    "location": "Remote",
+                    "work_mode": None,
+                    "source": "glassdoor",
+                    "source_url": "https://www.glassdoor.com/partner/jobListing.htm?pos=1",
+                    "source_url_kind": "direct",
+                    "posted_at": "2026-03-20T00:00:00Z",
+                    "description_snippet": "Entry level software engineer role focused on internal tools and APIs.",
+                    "salary_min": 105000,
+                    "salary_max": 130000,
+                    "metadata_quality_score": 86,
+                },
+                {
+                    "normalized_job_id": "b4",
+                    "title": "Customer Success Manager",
+                    "company": "Delta",
+                    "location": "Remote",
+                    "work_mode": "remote",
+                    "source": "linkedin",
+                    "source_url": "https://www.linkedin.com/jobs/view/4",
+                    "source_url_kind": "direct",
+                    "posted_at": "2026-03-23T00:00:00Z",
+                    "description_snippet": "Customer-facing role driving renewals and onboarding.",
+                    "salary_min": 110000,
+                    "salary_max": 135000,
+                    "metadata_quality_score": 94,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "resolve_profile_context",
+        lambda request: {
+            "enabled": True,
+            "applied": True,
+            "source": "payload",
+            "resume_name": "resume.pdf",
+            "updated_at": None,
+            "resume_char_count": 300,
+            "resume_sent_char_count": 300,
+            "resume_truncated": False,
+            "resume_text": "Entry level software engineer with backend Python API and distributed systems experience seeking remote roles.",
+        },
+    )
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "run_chat_completion",
+        lambda **kwargs: {
+            "output_text": "",
+            "tokens_in": 50,
+            "tokens_out": 10,
+            "cost_usd": "0.00020000",
+            "openai_request_id": "req-broad-fallback",
+        },
+    )
+
+    payload = {
+        "pipeline_id": "pipe-rank-broad-discovery",
+        "upstream": {"task_id": "norm-task", "run_id": "norm-run", "task_type": "jobs_normalize_v1"},
+        "request": {"query": "software engineer", "location": "United States"},
+        "rank_policy": {"llm_enabled": True, "llm_max_retries": 1},
+    }
+    result = jobs_rank_v1.execute(_task(payload), db=object())
+    artifact = result["content_json"]
+    ranked = artifact["ranked_jobs"]
+
+    assert {row["title"] for row in ranked[:2]} == {
+        "Junior Backend Engineer",
+        "Software Engineer I",
+    }
+    assert ranked[2]["title"] == "Software Developer"
+    assert ranked[-1]["title"] == "Customer Success Manager"
+    assert all(row["scoring_mode"] == "deterministic_broad_discovery" for row in ranked)
+    assert ranked[0]["overall_score_adjusted"] > 40.0
+    assert ranked[2]["overall_score_adjusted"] > ranked[3]["overall_score_adjusted"]
+    assert artifact["jobs_scored_artifact"]["llm"]["fallback_used"] is True
     warnings = artifact.get("warnings") or []
     assert any("llm_batch_1_failed" in row for row in warnings)
 

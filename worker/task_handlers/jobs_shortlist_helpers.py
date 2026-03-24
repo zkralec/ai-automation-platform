@@ -106,6 +106,20 @@ def _score_100(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _fallback_score_100(row: dict[str, Any]) -> float:
+    direct = _as_float(row.get("overall_score"))
+    scaled = _as_float(row.get("score"))
+    scaled_100 = 0.0
+    if scaled is not None:
+        if scaled <= 2.5:
+            scaled_100 = max(0.0, min(scaled * 50.0, 100.0))
+        else:
+            scaled_100 = max(0.0, min(scaled, 100.0))
+    if direct is None:
+        return scaled_100
+    return max(0.0, min(max(direct, scaled_100), 100.0))
+
+
 def _metadata_quality(row: dict[str, Any]) -> dict[str, Any]:
     details = metadata_quality_details(row)
     if isinstance(row.get("metadata_quality_score"), (int, float)):
@@ -171,6 +185,7 @@ def normalize_scored_jobs(rows: Any) -> list[dict[str, Any]]:
         item["duplicate_group_id"] = duplicate_group_id
         item["duplicate_count"] = duplicate_count
         item["_base_score_100"] = _score_100(raw)
+        item["_fallback_score_100"] = _fallback_score_100(raw)
         item["_company_key"] = _canonical_text(company) or "_unknown_company"
         item["_title_key"] = _canonical_text(title)
         item["_source_key"] = source
@@ -211,6 +226,7 @@ def shortlist_jobs(
     jobs_shortlist_repeat_penalty: float = 0.0,
     jobs_notification_cooldown_days: int = 0,
     resurface_seen_jobs: bool = True,
+    score_field: str = "_base_score_100",
     now_utc: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
     remaining = scored_jobs[:]
@@ -243,6 +259,7 @@ def shortlist_jobs(
             "jobs_notification_cooldown_days": jobs_notification_cooldown_days,
             "resurface_seen_jobs": resurface_seen_jobs,
         },
+        "score_field": score_field,
         "cooldown_suppressed_job_ids": [],
     }
 
@@ -253,7 +270,7 @@ def shortlist_jobs(
         best_row: dict[str, Any] | None = None
 
         for idx, row in enumerate(remaining):
-            base = float(row.get("_base_score_100") or 0.0)
+            base = float(row.get(score_field) or 0.0)
             source_key = str(row.get("_source_key") or "unknown")
             company_key = str(row.get("_company_key") or "_unknown_company")
             duplicate_group_id = row.get("duplicate_group_id")
@@ -333,7 +350,7 @@ def shortlist_jobs(
         diagnostics["picked_job_ids"].append(picked.get("job_id"))
 
     for row in remaining:
-        base = float(row.get("_base_score_100") or 0.0)
+        base = float(row.get(score_field) or 0.0)
         source_key = str(row.get("_source_key") or "unknown")
         company_key = str(row.get("_company_key") or "_unknown_company")
         duplicate_group_id = row.get("duplicate_group_id")

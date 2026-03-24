@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from candidate_profile import get_resume_profile as get_stored_resume_profile
 from task_handlers.errors import NonRetryableTaskError
+from task_handlers.jobs_normalize_helpers import metadata_quality_details
 
 SUPPORTED_JOB_SOURCES = ("linkedin", "indeed", "glassdoor", "handshake", "manual")
 DEFAULT_JOB_BOARDS = ("linkedin", "indeed", "glassdoor", "handshake")
@@ -29,6 +30,47 @@ MAX_JOBS_NOTIFICATION_COOLDOWN_DAYS = 30
 DEFAULT_JOBS_SHORTLIST_REPEAT_PENALTY = 4.0
 MAX_JOBS_SHORTLIST_REPEAT_PENALTY = 20.0
 DEFAULT_RESURFACE_SEEN_JOBS = True
+DEFAULT_SHORTLIST_FAIL_SOFT_ENABLED = True
+DEFAULT_SHORTLIST_FALLBACK_MIN_ITEMS = 3
+MAX_SHORTLIST_FALLBACK_MIN_ITEMS = 20
+DEFAULT_SHORTLIST_FALLBACK_MIN_SCORE = 0.08
+DEFAULT_SEARCH_MODE = "broad_discovery"
+ALLOWED_SEARCH_MODES = {"broad_discovery", "precision_match"}
+
+_TITLE_FAMILY_ALIASES: dict[str, tuple[str, ...]] = {
+    "software_engineering": (
+        "software engineer",
+        "software developer",
+        "backend engineer",
+        "backend developer",
+        "backend software engineer",
+        "backend software developer",
+        "full stack engineer",
+        "full stack developer",
+        "fullstack engineer",
+        "fullstack developer",
+        "application engineer",
+        "swe",
+    ),
+}
+_ENTRY_HINTS = (
+    "entry level",
+    "entry-level",
+    "junior",
+    "jr ",
+    " jr",
+    "new grad",
+    "new graduate",
+    "graduate",
+    "software engineer i",
+    "engineer i",
+    "associate",
+)
+_WORK_MODE_HINTS: dict[str, tuple[str, ...]] = {
+    "remote": (" remote ", "remote-friendly", "remote friendly", "work from home", "wfh", "anywhere"),
+    "hybrid": (" hybrid ",),
+    "onsite": ("on site", "on-site", " onsite ", "in office", "in-office"),
+}
 
 
 def utc_iso() -> str:
@@ -106,6 +148,186 @@ def _dedupe_text_list(values: list[str]) -> list[str]:
         seen.add(key)
         deduped.append(value.strip())
     return deduped
+
+
+def _canonical_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
+    return " ".join(text.split())
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    candidate = _canonical_text(text)
+    target = _canonical_text(phrase)
+    if not candidate or not target:
+        return False
+    if candidate == target:
+        return True
+    return f" {target} " in f" {candidate} "
+
+
+def _contains_any_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    return any(_contains_phrase(text, phrase) for phrase in phrases)
+
+
+def _request_title_phrases(request: dict[str, Any]) -> list[str]:
+    phrases = _dedupe_text_list(
+        [
+            _pick_text(request, ("desired_title",)) or "",
+            _pick_text(request, ("query", "search_query")) or "",
+            *_as_text_list(request.get("titles")),
+        ]
+    )
+    return [_canonical_text(value) for value in phrases if _canonical_text(value)]
+
+
+def _active_title_families(request: dict[str, Any]) -> set[str]:
+    families: set[str] = set()
+    for phrase in _request_title_phrases(request):
+        for family_name, aliases in _TITLE_FAMILY_ALIASES.items():
+            if _contains_any_phrase(phrase, aliases):
+                families.add(family_name)
+    return families
+
+
+def _normalize_search_mode(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in ALLOWED_SEARCH_MODES:
+        return normalized
+    return None
+
+
+def is_broad_discovery_request(request: dict[str, Any]) -> bool:
+    explicit_titles = _dedupe_text_list(
+        [value for value in [_pick_text(request, ("desired_title",)), *_as_text_list(request.get("titles"))] if value]
+    )
+    explicit_title_phrases = [_canonical_text(value) for value in explicit_titles if _canonical_text(value)]
+    if explicit_title_phrases:
+        generic_title_request = all(
+            any(_contains_any_phrase(phrase, aliases) for aliases in _TITLE_FAMILY_ALIASES.values())
+            for phrase in explicit_title_phrases
+        )
+    else:
+        generic_title_request = bool(_active_title_families(request))
+
+    if not generic_title_request:
+        return False
+
+    has_specific_constraints = bool(
+        _as_text_list(request.get("desired_title_keywords"))
+        or _as_text_list(request.get("keywords"))
+        or _as_text_list(request.get("work_modes"))
+        or _as_text_list(request.get("work_mode_preference"))
+        or _as_text_list(request.get("experience_levels"))
+        or _as_text_list(request.get("location_keywords"))
+        or _pick_text(request, ("experience_level",))
+        or _as_float(request.get("minimum_salary"))
+        or _as_float(request.get("desired_salary_min"))
+        or _as_float(request.get("desired_salary_max"))
+    )
+    return not has_specific_constraints
+
+
+def _infer_work_mode_from_text(*parts: Any) -> str | None:
+    haystack = f" {' '.join(_canonical_text(part) for part in parts if part)} "
+    if not haystack.strip():
+        return None
+    for mode, hints in _WORK_MODE_HINTS.items():
+        if any(hint in haystack for hint in hints):
+            return mode
+    return None
+
+
+def _infer_experience_from_text(*parts: Any) -> str | None:
+    haystack = f" {' '.join(_canonical_text(part) for part in parts if part)} "
+    if not haystack.strip():
+        return None
+    if any(hint in haystack for hint in _ENTRY_HINTS):
+        return "entry"
+    return None
+
+
+def deterministic_job_signals(job: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    title = _canonical_text(job.get("title"))
+    description = _canonical_text(job.get("description_snippet"))
+    location = _canonical_text(job.get("location"))
+    haystack = " ".join(part for part in (title, description, location) if part)
+    request_titles = _request_title_phrases(request)
+    request_keywords = [_canonical_text(value) for value in _as_text_list(request.get("keywords")) if _canonical_text(value)]
+    active_families = _active_title_families(request)
+
+    title_family_hits = 0
+    for family_name in active_families:
+        aliases = _TITLE_FAMILY_ALIASES.get(family_name, ())
+        if _contains_any_phrase(title, aliases):
+            title_family_hits += 1
+
+    title_exact_hits = sum(1 for phrase in request_titles if phrase and _contains_phrase(title, phrase))
+    keyword_hits = sum(1 for phrase in request_keywords if phrase and _contains_phrase(haystack, phrase))
+
+    work_mode = _normalize_work_mode(job.get("work_mode")) or _infer_work_mode_from_text(job.get("title"), job.get("location"), job.get("description_snippet"))
+    experience_level = _normalize_experience_level(job.get("experience_level")) or _infer_experience_from_text(job.get("title"), job.get("description_snippet"))
+
+    salary_min = _as_float(job.get("salary_min")) or 0.0
+    salary_max = _as_float(job.get("salary_max")) or 0.0
+    salary_anchor = max(salary_min, salary_max)
+
+    metadata = metadata_quality_details(job)
+    metadata_quality_score = max(0.0, min(float(metadata.get("metadata_quality_score") or 0.0), 100.0))
+    source_url_kind = str(metadata.get("source_url_kind") or "").strip().lower()
+    has_direct_source_url = bool(metadata.get("has_direct_source_url"))
+    broad_discovery = is_broad_discovery_request(request)
+
+    title_signal = min(title_family_hits * 0.62 + title_exact_hits * 0.28, 1.7)
+    keyword_signal = min(keyword_hits * 0.14, 0.42)
+    salary_signal = min(salary_anchor / 260000.0, 0.55) if salary_anchor > 0 else 0.0
+    work_mode_signal = 0.22 if work_mode == "remote" else 0.12 if work_mode == "hybrid" else 0.0
+    experience_signal = (
+        0.18
+        if experience_level in {"entry", "internship"}
+        else 0.1
+        if experience_level == "mid"
+        else 0.05
+        if experience_level == "senior"
+        else 0.0
+    )
+    metadata_signal = min(metadata_quality_score / 100.0 * 0.28, 0.28)
+    direct_source_bonus = 0.12 if has_direct_source_url else 0.05 if source_url_kind not in {"", "missing"} else 0.0
+    broad_discovery_bonus = 0.18 if broad_discovery and title_family_hits > 0 else 0.0
+
+    total_score = round(
+        title_signal
+        + keyword_signal
+        + salary_signal
+        + work_mode_signal
+        + experience_signal
+        + metadata_signal
+        + direct_source_bonus
+        + broad_discovery_bonus,
+        4,
+    )
+
+    return {
+        "broad_discovery": broad_discovery,
+        "title_family_hits": title_family_hits,
+        "title_exact_hits": title_exact_hits,
+        "keyword_hits": keyword_hits,
+        "title_signal": round(title_signal, 4),
+        "keyword_signal": round(keyword_signal, 4),
+        "salary_signal": round(salary_signal, 4),
+        "work_mode_signal": round(work_mode_signal, 4),
+        "experience_signal": round(experience_signal, 4),
+        "metadata_signal": round(metadata_signal, 4),
+        "direct_source_bonus": round(direct_source_bonus, 4),
+        "metadata_quality_score": round(metadata_quality_score, 2),
+        "source_url_kind": source_url_kind or None,
+        "has_direct_source_url": has_direct_source_url,
+        "inferred_work_mode": work_mode,
+        "inferred_experience_level": experience_level,
+        "score": total_score,
+    }
 
 
 def _normalize_experience_level(value: Any) -> str | None:
@@ -207,6 +429,22 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
     if not experience_level and experience_levels:
         experience_level = experience_levels[0]
 
+    search_mode = _normalize_search_mode(request.get("search_mode"))
+    if search_mode is None:
+        inferred_mode = {
+            "query": query,
+            "desired_title": desired_title,
+            "titles": titles,
+            "keywords": keywords,
+            "work_modes": work_mode_preference,
+            "experience_levels": experience_levels,
+            "location_keywords": _as_text_list(request.get("location_keywords")),
+            "minimum_salary": minimum_salary,
+            "desired_salary_min": desired_salary_min,
+            "desired_salary_max": _as_float(request.get("desired_salary_max")),
+        }
+        search_mode = "broad_discovery" if is_broad_discovery_request(inferred_mode) else "precision_match"
+
     max_jobs = _as_bounded_int(
         request.get("result_limit_per_source")
         or request.get("max_jobs_per_source")
@@ -232,15 +470,15 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
     )
 
     max_queries_per_run = _as_bounded_int(
-        request.get("max_queries_per_run") or DEFAULT_MAX_QUERIES_PER_RUN,
-        default=DEFAULT_MAX_QUERIES_PER_RUN,
+        request.get("max_queries_per_run") or (14 if search_mode == "broad_discovery" else 8),
+        default=14 if search_mode == "broad_discovery" else 8,
         minimum=1,
         maximum=MAX_MAX_QUERIES_PER_RUN,
     )
 
     enable_query_expansion = _as_bool(request.get("enable_query_expansion"))
     if enable_query_expansion is None:
-        enable_query_expansion = DEFAULT_ENABLE_QUERY_EXPANSION
+        enable_query_expansion = True if search_mode == "broad_discovery" else False
 
     early_stop_when_no_new_results = _as_bool(request.get("early_stop_when_no_new_results"))
     if early_stop_when_no_new_results is None:
@@ -279,7 +517,7 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
     shortlist_max_items = max(1, min(shortlist_max_items, 100))
     shortlist_min_score = _as_float(request.get("shortlist_min_score"))
     if shortlist_min_score is None:
-        shortlist_min_score = 0.75
+        shortlist_min_score = 0.5 if search_mode == "broad_discovery" else 0.85
     try:
         shortlist_per_source_cap = int(request.get("shortlist_per_source_cap") or 3)
     except (TypeError, ValueError):
@@ -290,6 +528,12 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
     freshness_preference = freshness_preference.strip().lower().replace("-", "_").replace(" ", "_")
     if freshness_preference not in {"off", "prefer_recent", "strong_prefer_recent"}:
         freshness_preference = "off"
+
+    prefer_recent = _as_bool(request.get("prefer_recent"))
+    if prefer_recent is None:
+        prefer_recent = freshness_preference in {"prefer_recent", "strong_prefer_recent"}
+    if prefer_recent and freshness_preference == "off":
+        freshness_preference = "prefer_recent"
 
     freshness_weight_enabled = _as_bool(request.get("shortlist_freshness_weight_enabled"))
     if freshness_weight_enabled is None:
@@ -308,8 +552,8 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
     digest_format = str(request.get("digest_format") or "compact").strip().lower() or "compact"
 
     jobs_notification_cooldown_days = _as_bounded_int(
-        request.get("jobs_notification_cooldown_days") or DEFAULT_JOBS_NOTIFICATION_COOLDOWN_DAYS,
-        default=DEFAULT_JOBS_NOTIFICATION_COOLDOWN_DAYS,
+        request.get("jobs_notification_cooldown_days") or (3 if search_mode == "broad_discovery" else 7),
+        default=3 if search_mode == "broad_discovery" else 7,
         minimum=0,
         maximum=MAX_JOBS_NOTIFICATION_COOLDOWN_DAYS,
     )
@@ -332,9 +576,37 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
     rank_llm_enabled = bool(request.get("rank_llm_enabled", True))
     digest_llm_enabled = bool(request.get("digest_llm_enabled", True))
 
+    shortlist_fail_soft_enabled = _as_bool(request.get("shortlist_fail_soft_enabled"))
+    if shortlist_fail_soft_enabled is None:
+        shortlist_fail_soft_enabled = search_mode == "broad_discovery"
+
+    shortlist_fallback_min_items = _as_bounded_int(
+        request.get("shortlist_fallback_min_items") or (5 if search_mode == "broad_discovery" else 0),
+        default=5 if search_mode == "broad_discovery" else 0,
+        minimum=0,
+        maximum=MAX_SHORTLIST_FALLBACK_MIN_ITEMS,
+    )
+
+    shortlist_fallback_min_score = _as_float(request.get("shortlist_fallback_min_score"))
+    if shortlist_fallback_min_score is None:
+        shortlist_fallback_min_score = DEFAULT_SHORTLIST_FALLBACK_MIN_SCORE if search_mode == "broad_discovery" else 0.2
+
+    require_experience_match = _as_bool(request.get("require_experience_match"))
+    if require_experience_match is None:
+        require_experience_match = search_mode == "precision_match" and bool(experience_levels)
+
+    require_work_mode_match = _as_bool(request.get("require_work_mode_match"))
+    if require_work_mode_match is None:
+        require_work_mode_match = search_mode == "precision_match" and bool(work_mode_preference)
+
+    require_keyword_match = _as_bool(request.get("require_keyword_match"))
+    if require_keyword_match is None:
+        require_keyword_match = search_mode == "precision_match" and bool(keywords)
+
     return {
         "query": query,
         "location": location,
+        "search_mode": search_mode,
         "titles": titles,
         "keywords": keywords,
         "excluded_keywords": excluded_keywords,
@@ -367,20 +639,25 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
         "desired_salary_max": _as_float(request.get("desired_salary_max")),
         "require_salary_data": bool(request.get("require_salary_data", False)),
         "experience_levels": experience_levels,
-        "require_experience_match": bool(request.get("require_experience_match", False)),
+        "require_experience_match": bool(require_experience_match),
         "clearance_required": request.get("clearance_required"),
         "required_clearances": _as_text_list(request.get("required_clearances")),
         "require_clearance_match": bool(request.get("require_clearance_match", False)),
         "work_modes": work_mode_preference,
-        "require_work_mode_match": bool(request.get("require_work_mode_match", False)),
+        "require_work_mode_match": bool(require_work_mode_match),
+        "require_keyword_match": bool(require_keyword_match),
         "location_keywords": _as_text_list(request.get("location_keywords")),
         "shortlist_max_items": shortlist_max_items,
         "shortlist_min_score": float(shortlist_min_score),
         "shortlist_per_source_cap": shortlist_per_source_cap,
         "shortlist_diversity_mode": str(request.get("shortlist_diversity_mode") or "balanced_sources").strip().lower(),
+        "prefer_recent": bool(prefer_recent),
         "shortlist_freshness_preference": freshness_preference,
         "shortlist_freshness_weight_enabled": bool(freshness_weight_enabled),
         "shortlist_freshness_max_bonus": float(freshness_max_bonus),
+        "shortlist_fail_soft_enabled": bool(shortlist_fail_soft_enabled),
+        "shortlist_fallback_min_items": shortlist_fallback_min_items,
+        "shortlist_fallback_min_score": float(shortlist_fallback_min_score),
         "digest_format": digest_format,
         "jobs_notification_cooldown_days": jobs_notification_cooldown_days,
         "jobs_shortlist_repeat_penalty": float(jobs_shortlist_repeat_penalty),
@@ -542,6 +819,7 @@ def matches_filters(job: dict[str, Any], request: dict[str, Any]) -> bool:
     title = str(job.get("title") or "")
     location = str(job.get("location") or "")
     description = str(job.get("description_snippet") or "")
+    search_mode = _normalize_search_mode(request.get("search_mode")) or DEFAULT_SEARCH_MODE
     experience = _normalize_experience_level(job.get("experience_level"))
     work_mode = _normalize_work_mode(job.get("work_mode"))
 
@@ -549,9 +827,18 @@ def matches_filters(job: dict[str, Any], request: dict[str, Any]) -> bool:
     desired_title = request.get("desired_title")
     if isinstance(desired_title, str) and desired_title.strip():
         include_titles = [desired_title.strip()] + include_titles
+    if search_mode == "precision_match" and not include_titles:
+        include_titles = [value for value in list(request.get("titles") or []) if isinstance(value, str) and value.strip()]
     exclude_titles = list(request.get("excluded_title_keywords") or [])
     if not _matches_keywords(title, include_titles, exclude_titles):
         return False
+
+    require_keyword_match = bool(request.get("require_keyword_match"))
+    keywords = [value for value in list(request.get("keywords") or []) if isinstance(value, str) and value.strip()]
+    if keywords and require_keyword_match:
+        haystack = " ".join((title, location, description)).lower()
+        if not any(keyword.lower() in haystack for keyword in keywords):
+            return False
 
     location_keywords = list(request.get("location_keywords") or [])
     if location_keywords:
@@ -629,38 +916,10 @@ def matches_filters(job: dict[str, Any], request: dict[str, Any]) -> bool:
 
 
 def score_job(job: dict[str, Any], request: dict[str, Any]) -> float:
-    title = str(job.get("title") or "").lower()
-    description = str(job.get("description_snippet") or "").lower()
-    salary_min = _as_float(job.get("salary_min")) or 0.0
-    salary_max = _as_float(job.get("salary_max")) or 0.0
-    work_mode = _normalize_work_mode(job.get("work_mode"))
-    experience_level = _normalize_experience_level(job.get("experience_level"))
-    clearance_required = _as_bool(job.get("clearance_required")) is True
-
-    desired_titles = list(request.get("desired_title_keywords") or [])
-    desired_title = request.get("desired_title")
-    if isinstance(desired_title, str) and desired_title.strip():
-        desired_titles = [desired_title.strip()] + desired_titles
-
-    title_hits = sum(1 for keyword in desired_titles if keyword.lower() in title)
-    text_hits = sum(1 for keyword in desired_titles if keyword.lower() in description)
-    salary_anchor = max(salary_min, salary_max)
-    salary_score = min(salary_anchor / 250000.0, 1.4) if salary_anchor > 0 else 0.0
-
-    score = 0.0
-    score += min(title_hits * 0.25, 1.0)
-    score += min(text_hits * 0.12, 0.36)
-    score += salary_score
-    if work_mode == "remote":
-        score += 0.2
-    elif work_mode == "hybrid":
-        score += 0.1
-    if clearance_required:
-        score += 0.1
-    if experience_level in {"entry", "mid"}:
+    signals = deterministic_job_signals(job, request)
+    score = float(signals.get("score") or 0.0)
+    if _as_bool(job.get("clearance_required")) is True:
         score += 0.08
-    if experience_level == "senior":
-        score += 0.03
     return round(score, 4)
 
 

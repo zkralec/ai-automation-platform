@@ -1536,10 +1536,12 @@ class PlannerRtxPresetCreate(BaseModel):
 ALLOWED_JOB_WATCHER_SOURCES = {"linkedin", "indeed", "glassdoor", "handshake"}
 ALLOWED_JOB_WATCHER_WORK_MODES = {"remote", "hybrid", "onsite"}
 ALLOWED_JOB_WATCHER_FRESHNESS = {"off", "prefer_recent", "strong_prefer_recent"}
+ALLOWED_JOB_WATCHER_SEARCH_MODES = {"broad_discovery", "precision_match"}
 
 
 class PlannerJobsPresetCreate(BaseModel):
     interval_seconds: int = Field(default=300, ge=60, le=86400)
+    search_mode: Optional[str] = None
     desired_title: Optional[str] = None
     desired_titles: Optional[List[str]] = None
     keywords: Optional[List[str]] = None
@@ -1703,6 +1705,18 @@ class PlannerJobsPresetCreate(BaseModel):
         normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
         if normalized not in ALLOWED_JOB_WATCHER_FRESHNESS:
             raise ValueError("freshness_preference must be one of: off, prefer_recent, strong_prefer_recent")
+        return normalized
+
+    @field_validator("search_mode", mode="before")
+    @classmethod
+    def _validate_search_mode(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("must be a string")
+        normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized not in ALLOWED_JOB_WATCHER_SEARCH_MODES:
+            raise ValueError("search_mode must be one of: broad_discovery, precision_match")
         return normalized
 
     @model_validator(mode="after")
@@ -1905,6 +1919,38 @@ def _summary_sources_from_request(request: dict[str, Any]) -> list[str]:
     return sources
 
 
+def _summary_search_mode_from_request(request: dict[str, Any]) -> str:
+    direct = request.get("search_mode")
+    if isinstance(direct, str):
+        normalized = direct.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in ALLOWED_JOB_WATCHER_SEARCH_MODES:
+            return normalized
+
+    query = str(request.get("query") or "").strip().lower()
+    titles = [
+        str(item).strip().lower()
+        for item in (request.get("titles") if isinstance(request.get("titles"), list) else [])
+        if str(item).strip()
+    ]
+    keywords = request.get("keywords") if isinstance(request.get("keywords"), list) else []
+    work_modes = request.get("work_modes") if isinstance(request.get("work_modes"), list) else request.get("work_mode_preference")
+    experience = request.get("experience_levels") if isinstance(request.get("experience_levels"), list) else []
+    has_constraints = bool(
+        keywords
+        or work_modes
+        or experience
+        or request.get("experience_level")
+        or request.get("minimum_salary")
+        or request.get("desired_salary_min")
+        or request.get("desired_salary_max")
+    )
+    generic_phrases = ("software engineer", "software developer", "backend engineer", "backend developer", "swe")
+    candidate_text = " ".join([query, *titles]).strip()
+    if any(phrase in candidate_text for phrase in generic_phrases) and not has_constraints:
+        return "broad_discovery"
+    return "precision_match"
+
+
 def _job_preview_rows(digest_json: dict[str, Any]) -> list[dict[str, Any]]:
     raw_rows = digest_json.get("digest_jobs")
     if not isinstance(raw_rows, list):
@@ -2027,6 +2073,7 @@ def _build_jobs_workflow_summary(
     return {
         "kind": "jobs_watcher",
         "pipeline_id": pipeline_id,
+        "search_mode": _summary_search_mode_from_request(request),
         "enabled_sources": _summary_sources_from_request(request),
         "query_count_used": _as_summary_int(collection_counts.get("queries_executed_count"), _as_summary_int(collection_observability.get("queries_executed"))),
         "counts": {
@@ -2761,6 +2808,7 @@ def upsert_jobs_digest_planner_template_route(req: PlannerJobsPresetCreate):
     try:
         row = ensure_jobs_digest_template(
             interval_seconds=req.interval_seconds,
+            search_mode=req.search_mode,
             desired_title=req.desired_title,
             desired_titles=req.desired_titles,
             keywords=req.keywords,
@@ -2789,6 +2837,7 @@ def upsert_jobs_digest_planner_template_route(req: PlannerJobsPresetCreate):
             "planner_template_jobs_digest_upserted",
             template_id=row.get("id"),
             interval_seconds=req.interval_seconds,
+            search_mode=req.search_mode,
             desired_title=req.desired_title,
             desired_titles=req.desired_titles,
             keywords=req.keywords,

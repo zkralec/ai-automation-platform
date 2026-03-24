@@ -156,6 +156,7 @@ describe("WorkflowsPage", () => {
         task_type: "jobs_collect_v1",
         payload_json: JSON.stringify({
           request: {
+            search_mode: "broad_discovery",
             titles: ["ML Engineer"],
             keywords: ["python"],
             locations: ["Remote"],
@@ -174,6 +175,7 @@ describe("WorkflowsPage", () => {
         metadata: {},
         workflow_summary: {
           kind: "jobs_watcher",
+          search_mode: "broad_discovery",
           enabled_sources: ["linkedin", "indeed"],
           query_count_used: 12,
           counts: {
@@ -253,8 +255,10 @@ describe("WorkflowsPage", () => {
     expect(screen.getByText("Latest Digest Preview")).toBeInTheDocument();
     expect(screen.getByText(/Solid senior backend batch with good source diversity/i)).toBeInTheDocument();
     expect(screen.getByText(/420 raw discovered across 2 live sources/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/broad discovery/i).length).toBeGreaterThan(0);
 
     fireEvent.change(screen.getByLabelText("Desired titles"), { target: { value: "ML Engineer, Data Engineer" } });
+    fireEvent.change(screen.getByLabelText("Search mode"), { target: { value: "precision_match" } });
     fireEvent.change(screen.getByLabelText("Preferred locations"), { target: { value: "Remote\nAustin, TX" } });
     fireEvent.change(screen.getByLabelText("Result limit per source"), { target: { value: "30" } });
     fireEvent.change(screen.getByLabelText("Max queries per run"), { target: { value: "14" } });
@@ -266,6 +270,7 @@ describe("WorkflowsPage", () => {
     expect(mutateSaveJobs).toHaveBeenCalled();
     const payload = mutateSaveJobs.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.interval_seconds).toBe(300);
+    expect(payload.search_mode).toBe("precision_match");
     expect(payload.desired_titles).toEqual(["ML Engineer", "Data Engineer"]);
     expect(payload.preferred_locations).toEqual(["Remote", "Austin, TX"]);
     expect(payload.result_limit_per_source).toBe(30);

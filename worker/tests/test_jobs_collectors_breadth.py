@@ -1,5 +1,6 @@
 import os
 import sys
+from urllib.error import HTTPError
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
@@ -230,6 +231,145 @@ def test_collect_jobs_from_board_paginates_until_no_new_results(monkeypatch) -> 
     assert meta["pages_fetched"] == 3
     assert meta["pages_with_results"] == 3
     assert meta["stop_reason"] == "no_new_results"
-    assert requested_urls[0] == "https://www.linkedin.com/jobs/search/?keywords=machine+learning+engineer&location=Remote"
+    assert requested_urls[0] == "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=machine+learning+engineer&location=Remote"
     assert "start=25" in requested_urls[1]
     assert "start=50" in requested_urls[2]
+
+
+def test_collect_jobs_from_board_uses_source_specific_search_urls_and_headers(monkeypatch) -> None:
+    requested: list[tuple[str, dict[str, object]]] = []
+    html_by_board = {
+        "linkedin": '<a href="https://www.linkedin.com/jobs/view/1?position=1&amp;pageNum=0">Software Engineer</a><div>Company: Acme Location: Remote</div>',
+        "indeed": '<a href="/viewjob?jk=123">Software Engineer</a><div data-testid="company-name">Acme</div><div data-testid="text-location">Remote</div>',
+        "glassdoor": '<a href="/partner/jobListing.htm?pos=101">Software Engineer</a><div>Employer Acme</div><div data-test="location">Remote</div>',
+        "handshake": '<a href="/stu/jobs/3001">Software Engineer</a><div class="employer">Acme</div><div class="location">Remote</div>',
+    }
+    expected_urls = {
+        "linkedin": "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=software+engineer&location=United+States",
+        "indeed": "https://www.indeed.com/jobs?q=software+engineer&l=United+States&from=searchOnHP&sort=date",
+        "glassdoor": "https://www.glassdoor.com/Job/jobs.htm?sc.keyword=software+engineer&locKeyword=United+States",
+        "handshake": "https://app.joinhandshake.com/stu/postings?query=software+engineer",
+    }
+
+    def _fake_fetch(url: str, **kwargs: object) -> str:
+        requested.append((url, kwargs))
+        for board, expected_url in expected_urls.items():
+            if url == expected_url:
+                return html_by_board[board]
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(job_boards_scrape, "fetch_html", _fake_fetch)
+
+    for board in ("linkedin", "indeed", "glassdoor", "handshake"):
+        jobs, warnings, meta = job_boards_scrape.collect_jobs_from_board(
+            board,
+            query="software engineer United States",
+            location="United States",
+            max_jobs=5,
+            max_pages=1,
+        )
+
+        assert warnings == []
+        assert len(jobs) == 1
+        assert meta["last_request_url"] == expected_urls[board]
+        if board == "linkedin":
+            assert jobs[0]["url"] == "https://www.linkedin.com/jobs/view/1?position=1&pageNum=0"
+
+    requested_by_url = {url: kwargs for url, kwargs in requested}
+    for board, expected_url in expected_urls.items():
+        kwargs = requested_by_url[expected_url]
+        headers = kwargs.get("extra_headers")
+        assert isinstance(headers, dict)
+        assert str(headers["User-Agent"]).startswith("Mozilla/5.0")
+        assert headers["Referer"]
+        assert float(kwargs["rate_limit_seconds"]) >= 2.0
+
+
+def test_collect_jobs_from_board_falls_back_from_linkedin_guest_endpoint(monkeypatch) -> None:
+    requested_urls: list[str] = []
+
+    def _fake_fetch(url: str, **_kwargs: object) -> str:
+        requested_urls.append(url)
+        if "jobs-guest/jobs/api/seeMoreJobPostings/search" in url:
+            raise HTTPError(url, 999, "Request denied", hdrs=None, fp=None)
+        return '<a href="/jobs/view/123">Software Engineer</a><div>Company: Acme Location: Remote</div>'
+
+    monkeypatch.setattr(job_boards_scrape, "fetch_html", _fake_fetch)
+
+    jobs, warnings, meta = job_boards_scrape.collect_jobs_from_board(
+        "linkedin",
+        query="software engineer United States",
+        location="United States",
+        max_jobs=5,
+        max_pages=1,
+    )
+
+    assert warnings == []
+    assert len(jobs) == 1
+    assert len(requested_urls) == 2
+    assert "jobs-guest/jobs/api/seeMoreJobPostings/search" in requested_urls[0]
+    assert meta["request_attempts"][0]["error_type"] == "fetch_http_999"
+    assert meta["request_attempts"][1]["status"] == "ok"
+
+
+def test_collect_jobs_from_board_falls_back_to_alternate_indeed_search_url(monkeypatch) -> None:
+    requested_urls: list[str] = []
+
+    def _fake_fetch(url: str, **_kwargs: object) -> str:
+        requested_urls.append(url)
+        if "from=searchOnHP" in url:
+            raise HTTPError(url, 403, "Forbidden", hdrs=None, fp=None)
+        return '<a href="/viewjob?jk=123">Software Engineer</a><div data-testid="company-name">Acme</div>'
+
+    monkeypatch.setattr(job_boards_scrape, "fetch_html", _fake_fetch)
+
+    jobs, warnings, meta = job_boards_scrape.collect_jobs_from_board(
+        "indeed",
+        query="software engineer United States",
+        location="United States",
+        max_jobs=5,
+        max_pages=1,
+    )
+
+    assert warnings == []
+    assert len(jobs) == 1
+    assert len(requested_urls) == 2
+    assert "from=searchOnHP" in requested_urls[0]
+    assert meta["request_attempts"][0]["error_type"] == "fetch_blocked_403"
+    assert meta["request_attempts"][1]["status"] == "ok"
+
+
+def test_collect_jobs_from_board_classifies_source_specific_failures(monkeypatch) -> None:
+    def _blocked(url: str, **_kwargs: object) -> str:
+        raise HTTPError(url, 403, "Forbidden", hdrs=None, fp=None)
+
+    monkeypatch.setattr(job_boards_scrape, "fetch_html", _blocked)
+    _jobs, warnings, meta = job_boards_scrape.collect_jobs_from_board(
+        "glassdoor",
+        query="software engineer",
+        location="United States",
+        max_jobs=5,
+        max_pages=1,
+    )
+
+    assert "fetch_blocked_403" in warnings[0]
+    assert meta["error_type"] == "fetch_blocked_403"
+    assert meta["error_status"] == 403
+    assert meta["request_urls_tried"]
+
+    def _missing(url: str, **_kwargs: object) -> str:
+        raise HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
+
+    monkeypatch.setattr(job_boards_scrape, "fetch_html", _missing)
+    _jobs, warnings, meta = job_boards_scrape.collect_jobs_from_board(
+        "handshake",
+        query="software engineer",
+        location="United States",
+        max_jobs=5,
+        max_pages=1,
+        url_override="https://joinhandshake.com/students/jobs/search/?query=software+engineer",
+    )
+
+    assert "fetch_not_found_404" in warnings[0]
+    assert meta["error_type"] == "fetch_not_found_404"
+    assert meta["error_status"] == 404

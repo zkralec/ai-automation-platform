@@ -52,6 +52,7 @@ def test_jobs_shortlist_v1_consumes_jobs_scored_from_rank_artifact(monkeypatch) 
                         "source": "linkedin",
                         "overall_score": 94,
                         "score": 1.88,
+                        "scoring_mode": "llm_structured",
                         "duplicate_group_id": "dup-1",
                         "explanation_summary": "Top fit.",
                     },
@@ -62,6 +63,7 @@ def test_jobs_shortlist_v1_consumes_jobs_scored_from_rank_artifact(monkeypatch) 
                         "source": "indeed",
                         "overall_score": 93,
                         "score": 1.86,
+                        "scoring_mode": "llm_structured",
                         "duplicate_group_id": "dup-2",
                         "explanation_summary": "Strong fit.",
                     },
@@ -72,6 +74,7 @@ def test_jobs_shortlist_v1_consumes_jobs_scored_from_rank_artifact(monkeypatch) 
                         "source": "glassdoor",
                         "overall_score": 90,
                         "score": 1.8,
+                        "scoring_mode": "llm_structured",
                         "duplicate_group_id": "dup-3",
                         "explanation_summary": "Good fit.",
                     },
@@ -82,6 +85,7 @@ def test_jobs_shortlist_v1_consumes_jobs_scored_from_rank_artifact(monkeypatch) 
                         "source": "glassdoor",
                         "overall_score": 89,
                         "score": 1.78,
+                        "scoring_mode": "llm_structured",
                         "duplicate_group_id": "dup-4",
                         "explanation_summary": "Similar role.",
                     },
@@ -106,6 +110,10 @@ def test_jobs_shortlist_v1_consumes_jobs_scored_from_rank_artifact(monkeypatch) 
     companies = [row.get("company") for row in artifact["shortlist"]]
     assert sorted(companies) == ["Acme", "Beta Labs"]
     assert artifact["shortlist_summary_metadata"]["upstream_artifact_type"] == "jobs.rank.v1"
+    assert artifact["ranking_mode"] == "llm_structured"
+    assert artifact["fallback_used"] is False
+    assert artifact["fail_soft_applied"] is False
+    assert artifact["shortlist_confidence"] == "normal"
     assert artifact["pipeline_counts"]["collected_count"] == 40
     assert artifact["jobs_top_artifact"]["pipeline_counts"]["deduped_count"] == 18
     assert isinstance(artifact["notification_candidates"], list)
@@ -261,6 +269,197 @@ def test_jobs_shortlist_v1_empty_input_keeps_artifact_shape(monkeypatch) -> None
     assert artifact["jobs_top_artifact"]["top_jobs"] == []
     assert artifact["pipeline_counts"]["shortlisted_count"] == 0
     assert result["next_tasks"][0]["task_type"] == "jobs_digest_v2"
+
+
+def test_jobs_shortlist_v1_fail_soft_selects_floor_when_rank_fallback_clears_standard_shortlist(monkeypatch) -> None:
+    monkeypatch.setattr(
+        jobs_shortlist_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.rank.v1",
+            "warnings": [
+                "llm_batch_1_failed: ValueError: empty_llm_output",
+                "llm_scoring_disabled_after_repeated_batch_failures",
+            ],
+            "model_usage": {"llm_runtime_enabled": True},
+            "jobs_scored_artifact": {
+                "artifact_type": "jobs_scored.v1",
+                "llm": {"fallback_used": True},
+                "jobs_scored": [
+                    {
+                        "job_id": "f1",
+                        "title": "Software Engineer, New Grad",
+                        "company": "Acme",
+                        "source": "linkedin",
+                        "overall_score": 4.0,
+                        "overall_score_adjusted": 0.0,
+                        "score": 0.0,
+                        "scoring_mode": "deterministic_fallback",
+                        "explanation_summary": "Deterministic fallback score.",
+                    },
+                    {
+                        "job_id": "f2",
+                        "title": "Software Engineer I",
+                        "company": "Beta",
+                        "source": "linkedin",
+                        "overall_score": 4.0,
+                        "overall_score_adjusted": 0.0,
+                        "score": 0.0,
+                        "scoring_mode": "deterministic_fallback",
+                        "explanation_summary": "Deterministic fallback score.",
+                    },
+                    {
+                        "job_id": "f3",
+                        "title": "Associate Software Engineer",
+                        "company": "Gamma",
+                        "source": "linkedin",
+                        "overall_score": 4.0,
+                        "overall_score_adjusted": 0.0,
+                        "score": 0.0,
+                        "scoring_mode": "deterministic_fallback",
+                        "explanation_summary": "Deterministic fallback score.",
+                    },
+                    {
+                        "job_id": "f4",
+                        "title": "Backend Engineer",
+                        "company": "Delta",
+                        "source": "linkedin",
+                        "overall_score": 4.0,
+                        "overall_score_adjusted": 0.0,
+                        "score": 0.0,
+                        "scoring_mode": "deterministic_fallback",
+                        "explanation_summary": "Deterministic fallback score.",
+                    },
+                ],
+            },
+            "ranked_jobs": [],
+        },
+    )
+
+    payload = {
+        "pipeline_id": "pipe-short-fail-soft",
+        "upstream": {"task_id": "rank-task", "run_id": "rank-run", "task_type": "jobs_rank_v1"},
+        "request": {
+            "search_mode": "broad_discovery",
+            "shortlist_max_items": 5,
+            "shortlist_min_score": 0.75,
+            "shortlist_fallback_min_items": 3,
+        },
+    }
+    result = jobs_shortlist_v1.execute(_task(payload), db=object())
+    artifact = result["content_json"]
+
+    assert artifact["shortlist_count"] == 3
+    assert artifact["ranking_mode"] == "deterministic_fallback"
+    assert artifact["fallback_used"] is True
+    assert artifact["fail_soft_applied"] is True
+    assert artifact["shortlist_confidence"] == "low"
+    assert artifact["shortlist_summary_metadata"]["fail_soft_target_items"] == 3
+    assert all(row["fail_soft_selected"] is True for row in artifact["shortlist"])
+    assert all(row["selection_basis"] == "fail_soft" for row in artifact["shortlist"])
+
+
+def test_jobs_shortlist_v1_fail_soft_still_allows_empty_shortlist_for_zero_signal_pool(monkeypatch) -> None:
+    monkeypatch.setattr(
+        jobs_shortlist_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.rank.v1",
+            "warnings": ["llm_batch_1_failed: ValueError: empty_llm_output"],
+            "model_usage": {"llm_runtime_enabled": True},
+            "jobs_scored_artifact": {
+                "artifact_type": "jobs_scored.v1",
+                "llm": {"fallback_used": True},
+                "jobs_scored": [
+                    {
+                        "job_id": "z1",
+                        "title": "Generic Role",
+                        "company": "UnknownCo",
+                        "source": "linkedin",
+                        "overall_score": 0.0,
+                        "overall_score_adjusted": 0.0,
+                        "score": 0.0,
+                        "scoring_mode": "deterministic_fallback",
+                        "explanation_summary": "Deterministic fallback score.",
+                    },
+                    {
+                        "job_id": "z2",
+                        "title": "Another Generic Role",
+                        "company": "UnknownCo2",
+                        "source": "linkedin",
+                        "overall_score": 0.0,
+                        "overall_score_adjusted": 0.0,
+                        "score": 0.0,
+                        "scoring_mode": "deterministic_fallback",
+                        "explanation_summary": "Deterministic fallback score.",
+                    },
+                ],
+            },
+            "ranked_jobs": [],
+        },
+    )
+
+    payload = {
+        "pipeline_id": "pipe-short-fail-soft-empty",
+        "upstream": {"task_id": "rank-task", "run_id": "rank-run", "task_type": "jobs_rank_v1"},
+        "request": {
+            "shortlist_max_items": 5,
+            "shortlist_min_score": 0.75,
+        },
+    }
+    result = jobs_shortlist_v1.execute(_task(payload), db=object())
+    artifact = result["content_json"]
+
+    assert artifact["shortlist_count"] == 0
+    assert artifact["ranking_mode"] == "deterministic_fallback"
+    assert artifact["fallback_used"] is True
+    assert artifact["fail_soft_applied"] is False
+    assert artifact["shortlist_confidence"] == "low"
+
+
+def test_jobs_shortlist_v1_recognizes_broad_discovery_ranking_mode(monkeypatch) -> None:
+    monkeypatch.setattr(
+        jobs_shortlist_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.rank.v1",
+            "warnings": ["llm_batch_1_failed: ValueError: empty_llm_output"],
+            "model_usage": {"llm_runtime_enabled": True},
+            "jobs_scored_artifact": {
+                "artifact_type": "jobs_scored.v1",
+                "llm": {"fallback_used": True},
+                "jobs_scored": [
+                    {
+                        "job_id": "bd1",
+                        "title": "Backend Engineer",
+                        "company": "Acme",
+                        "source": "linkedin",
+                        "overall_score": 61.0,
+                        "overall_score_adjusted": 49.0,
+                        "score": 0.98,
+                        "scoring_mode": "deterministic_broad_discovery",
+                        "explanation_summary": "Deterministic broad-discovery ranking used after LLM scoring was unavailable.",
+                    }
+                ],
+            },
+            "ranked_jobs": [],
+        },
+    )
+
+    payload = {
+        "pipeline_id": "pipe-short-broad-mode",
+        "upstream": {"task_id": "rank-task", "run_id": "rank-run", "task_type": "jobs_rank_v1"},
+        "request": {
+            "shortlist_max_items": 5,
+            "shortlist_min_score": 0.75,
+        },
+    }
+    result = jobs_shortlist_v1.execute(_task(payload), db=object())
+    artifact = result["content_json"]
+
+    assert artifact["ranking_mode"] == "deterministic_broad_discovery"
+    assert artifact["fallback_used"] is True
+    assert artifact["shortlist_confidence"] == "low"
 
 
 def test_jobs_shortlist_v1_duplicate_heavy_fixture_prefers_diversity(monkeypatch, jobs_v2_samples) -> None:

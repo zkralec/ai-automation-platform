@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from typing import Any
 
 from task_handlers.jobs_pipeline_common import (
@@ -13,6 +14,8 @@ from task_handlers.jobs_pipeline_common import (
     stage_idempotency_key,
     utc_iso,
 )
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_COLLECTOR_SOURCES = ("linkedin", "indeed", "glassdoor", "handshake")
 SUCCESSFUL_SOURCE_STATUSES = {"success", "partial_success"}
@@ -215,6 +218,11 @@ def _build_collection_observability(
                     "jobs_found": _meta_count(row, "jobs_found", 0),
                     "new_unique_jobs": _meta_count(row, "new_unique_jobs", 0),
                     "returned_count": _meta_count(row, "returned_count", 0),
+                    "pages_attempted": _meta_count(row, "pages_attempted", _meta_count(row, "pages_fetched", 0)),
+                    "request_urls_tried": row.get("request_urls_tried") if isinstance(row.get("request_urls_tried"), list) else [],
+                    "last_request_url": str(row.get("last_request_url") or "").strip() or None,
+                    "error_type": str(row.get("error_type") or "").strip() or None,
+                    "error_status": row.get("error_status") if isinstance(row.get("error_status"), int) else None,
                     "stop_reason": str(row.get("stop_reason") or "").strip() or None,
                 }
             )
@@ -227,11 +235,16 @@ def _build_collection_observability(
             "deduped_in_collection": deduped,
             "final_raw_jobs": jobs_count,
             "pages_fetched": pages_fetched,
+            "pages_attempted": _meta_count(meta, "pages_attempted", pages_fetched),
             "jobs_found_per_source": discovered,
             "queries_executed_count": queries_executed,
             "queries_attempted_count": len([row for row in queries_attempted if isinstance(row, str) and row.strip()]),
             "empty_queries_count": empty_queries,
             "query_examples": source_examples[:3],
+            "request_urls_tried": meta.get("request_urls_tried") if isinstance(meta.get("request_urls_tried"), list) else [],
+            "last_request_url": str(meta.get("last_request_url") or "").strip() or None,
+            "error_type": str(meta.get("error_type") or "").strip() or None,
+            "error_status": meta.get("error_status") if isinstance(meta.get("error_status"), int) else None,
             "missing_counts": {
                 "company": _meta_count(metadata, "missing_company", 0),
                 "posted_at": _meta_count(metadata, "missing_posted_at", 0),
@@ -298,6 +311,10 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
 
     payload = payload_object(task.payload_json)
     request = resolve_request(payload.get("request") if isinstance(payload.get("request"), dict) else payload)
+    if not isinstance(request.get("enabled_sources"), list) or not request.get("enabled_sources"):
+        request["enabled_sources"] = list(DEFAULT_JOB_BOARDS)
+    if not isinstance(request.get("sources"), list) or not request.get("sources"):
+        request["sources"] = list(request["enabled_sources"])
     pipeline_id = new_pipeline_id(payload.get("pipeline_id"))
 
     raw_jobs: list[dict[str, Any]] = []
@@ -320,6 +337,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         remaining_total_jobs = max_total_jobs - len(raw_jobs)
         if remaining_total_jobs <= 0:
             source_results[source_key] = {
+                "source": source_key,
                 "status": "skipped",
                 "jobs_count": 0,
                 "warnings": [],
@@ -335,7 +353,11 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 truncated_by_run_limit_count += len(manual_jobs) - remaining_total_jobs
                 manual_jobs = manual_jobs[:remaining_total_jobs]
             raw_jobs.extend(manual_jobs)
+            logger.info("jobs_collect source=%s jobs=%s status=success", source_key, len(manual_jobs))
+            if not manual_jobs:
+                logger.warning("jobs_collect source=%s jobs=0 status=empty", source_key)
             source_results[source_key] = {
+                "source": source_key,
                 "status": "success",
                 "jobs_count": len(manual_jobs),
                 "warnings": [],
@@ -362,7 +384,9 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         if source_key not in SUPPORTED_COLLECTOR_SOURCES:
             message = f"{source_key}: unsupported_source"
             collector_errors.append(message)
+            logger.error("jobs_collect source=%s failed: %s", source_key, message)
             source_results[source_key] = {
+                "source": source_key,
                 "status": "failed",
                 "jobs_count": 0,
                 "warnings": [],
@@ -374,6 +398,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
 
         if not collectors_enabled:
             source_results[source_key] = {
+                "source": source_key,
                 "status": "skipped",
                 "jobs_count": 0,
                 "warnings": [],
@@ -384,6 +409,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             continue
 
         try:
+            logger.info("jobs_collect source=%s status=start", source_key)
             collector = _load_collector_module(source_key)
             source_request = dict(request)
             per_source_limit = min(int(source_request.get("result_limit_per_source") or remaining_total_jobs), remaining_total_jobs)
@@ -427,7 +453,19 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             warnings.extend(source_warnings)
             collector_errors.extend(source_errors)
 
+            if status_raw == "failed":
+                logger.error(
+                    "jobs_collect source=%s failed: %s",
+                    source_key,
+                    source_errors[0] if source_errors else "collector_failed_without_error_details",
+                )
+            else:
+                logger.info("jobs_collect source=%s jobs=%s status=%s", source_key, len(collected), status_raw)
+                if len(collected) == 0:
+                    logger.warning("jobs_collect source=%s jobs=0 status=empty", source_key)
+
             source_results[source_key] = {
+                "source": source_key,
                 "status": status_raw,
                 "jobs_count": len(collected),
                 "warnings": source_warnings,
@@ -439,7 +477,9 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         except Exception as exc:
             error_text = f"{source_key}: collector_failed: {type(exc).__name__}: {exc}"
             collector_errors.append(error_text)
+            logger.error("jobs_collect source=%s failed: %s", source_key, error_text)
             source_results[source_key] = {
+                "source": source_key,
                 "status": "failed",
                 "jobs_count": 0,
                 "warnings": [],
@@ -584,6 +624,28 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "lineage": payload.get("lineage") if isinstance(payload.get("lineage"), dict) else {},
     }
 
+    debug_artifact = {
+        "artifact_type": "debug.json",
+        "pipeline_id": pipeline_id,
+        "sources_attempted": sources,
+        "sources_succeeded": successful_sources,
+        "sources_failed": failed_sources,
+        "sources_skipped": skipped_sources,
+        "per_source_job_counts": {key: int(row.get("jobs_count", 0) or 0) for key, row in source_results.items()},
+        "per_source_status": {
+            key: {
+                "source": key,
+                "status": str(row.get("status") or "").strip() or "unknown",
+                "error": row.get("error"),
+                "jobs_count": int(row.get("jobs_count", 0) or 0),
+            }
+            for key, row in source_results.items()
+        },
+        "warnings_count": len(warnings),
+        "collector_error_count": len(collector_errors),
+        "partial_success": artifact["partial_success"],
+    }
+
     upstream = build_upstream_ref(task, "jobs_collect_v1")
     upstream_run_id = upstream.get("run_id") or str(getattr(task, "id", ""))
     next_payload = {
@@ -611,11 +673,6 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             f" with {len(failed_sources)} failed sources."
         ),
         "content_json": artifact,
-        "debug_json": {
-            "pipeline_id": pipeline_id,
-            "warnings_count": len(warnings),
-            "collector_error_count": len(collector_errors),
-            "partial_success": artifact["partial_success"],
-        },
+        "debug_json": debug_artifact,
         "next_tasks": [next_task],
     }

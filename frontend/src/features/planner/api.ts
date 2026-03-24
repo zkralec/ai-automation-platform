@@ -78,6 +78,7 @@ export function saveRtx5090Preset(input: {
 
 export function saveJobsPreset(input: {
   interval_seconds: number;
+  search_mode?: "broad_discovery" | "precision_match" | null;
   desired_title?: string | null;
   desired_titles?: string[] | null;
   keywords?: string[] | null;

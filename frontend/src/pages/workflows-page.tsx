@@ -112,8 +112,11 @@ type JobWorkModeOption = (typeof JOB_WORK_MODE_OPTIONS)[number];
 
 const JOB_EXPERIENCE_LEVEL_OPTIONS = ["", "internship", "entry", "mid", "senior"] as const;
 const JOB_FRESHNESS_PREFERENCE_OPTIONS = ["off", "prefer_recent", "strong_prefer_recent"] as const;
+const JOB_SEARCH_MODE_OPTIONS = ["broad_discovery", "precision_match"] as const;
+type JobSearchModeOption = (typeof JOB_SEARCH_MODE_OPTIONS)[number];
 
 type JobsWatcherFormState = {
+  searchMode: JobSearchModeOption;
   desiredTitlesText: string;
   keywordsText: string;
   excludedKeywordsText: string;
@@ -132,6 +135,7 @@ type JobsWatcherFormState = {
 };
 
 const DEFAULT_JOBS_WATCHER_FORM_STATE: JobsWatcherFormState = {
+  searchMode: "broad_discovery",
   desiredTitlesText: "software engineer",
   keywordsText: "",
   excludedKeywordsText: "",
@@ -183,6 +187,7 @@ const PRIMARY_WATCHERS: Array<{
       request: {
         collectors_enabled: true,
         profile_mode: "resume_profile",
+        search_mode: "broad_discovery",
         query: "software engineer",
         location: "United States",
         sources: ["linkedin", "indeed", "glassdoor", "handshake"],
@@ -229,6 +234,7 @@ type WorkflowInsight = {
 };
 
 type JobsWorkflowSummary = {
+  searchMode: string | null;
   enabledSources: string[];
   queryCountUsed: number | null;
   rawJobsFound: number | null;
@@ -374,6 +380,14 @@ function normalizeFreshnessPreference(value: unknown): string {
     : "off";
 }
 
+function normalizeSearchMode(value: unknown): JobSearchModeOption {
+  if (typeof value !== "string") return "broad_discovery";
+  const normalized = value.trim().toLowerCase().replace("-", "_").replace(" ", "_");
+  return JOB_SEARCH_MODE_OPTIONS.includes(normalized as JobSearchModeOption)
+    ? (normalized as JobSearchModeOption)
+    : "broad_discovery";
+}
+
 function parseJobsWatcherFormFromPayload(rawPayloadJson: string | null | undefined): JobsWatcherFormState {
   const payload = parsePayloadObject(rawPayloadJson);
   const request = payload.request && typeof payload.request === "object" && !Array.isArray(payload.request)
@@ -458,6 +472,7 @@ function parseJobsWatcherFormFromPayload(rawPayloadJson: string | null | undefin
   const resurfaceSeenJobs = asBoolean(request.resurface_seen_jobs) ?? true;
 
   return {
+    searchMode: normalizeSearchMode(request.search_mode),
     desiredTitlesText: serializeDelimitedText(titles),
     keywordsText: serializeDelimitedText(keywords),
     excludedKeywordsText: serializeDelimitedText(excludedKeywords),
@@ -518,6 +533,7 @@ function parseJobsWorkflowSummary(watcher: Watcher | null): JobsWorkflowSummary 
     : [];
 
   return {
+    searchMode: asText(summary.search_mode),
     enabledSources: asStringArray(summary.enabled_sources),
     queryCountUsed: asNumber(summary.query_count_used),
     rawJobsFound: asNumber(counts.raw_jobs_found),
@@ -880,6 +896,7 @@ export function WorkflowsPage(): JSX.Element {
     error?: string;
     payload?: {
       interval_seconds: number;
+      search_mode?: JobSearchModeOption | null;
       desired_title?: string | null;
       desired_titles?: string[] | null;
       keywords?: string[] | null;
@@ -962,6 +979,7 @@ export function WorkflowsPage(): JSX.Element {
 
     const payload = {
       interval_seconds: Math.max(60, Number(intervalSeconds) || 300),
+      search_mode: jobsForm.searchMode,
       desired_title: desiredTitles[0] || null,
       desired_titles: desiredTitles.length > 0 ? desiredTitles : null,
       keywords: keywords.length > 0 ? keywords : null,
@@ -1010,6 +1028,7 @@ export function WorkflowsPage(): JSX.Element {
     if (primaryId === "jobs") {
       saveJobsMutation.mutate({
         interval_seconds: safeInterval,
+        search_mode: "broad_discovery",
         desired_title: "Software Engineer",
         desired_titles: ["Software Engineer"],
         preferred_locations: ["United States"],
@@ -1485,12 +1504,18 @@ export function WorkflowsPage(): JSX.Element {
                       </div>
                     </div>
 
-                    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+                    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
                       <div className="rounded-md border border-border/70 bg-background/80 px-2 py-2 text-xs">
                         <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Watcher</div>
                         <div className="mt-1 flex items-center gap-2">
                           <StatusBadge status={selectedWorkflowInsight.stateLabel} />
                           <span>{selectedWorkflowInsight.effectiveIntervalLabel}</span>
+                        </div>
+                      </div>
+                      <div className="rounded-md border border-border/70 bg-background/80 px-2 py-2 text-xs">
+                        <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+                        <div className="mt-1 text-foreground">
+                          {(selectedJobsWorkflowSummary?.searchMode || jobsForm.searchMode).replace(/_/g, " ")}
                         </div>
                       </div>
                       <div className="rounded-md border border-border/70 bg-background/80 px-2 py-2 text-xs">
@@ -1657,6 +1682,33 @@ export function WorkflowsPage(): JSX.Element {
                     <div className="space-y-3 rounded-md border border-border/70 bg-background/80 px-3 py-3">
                       <div className="text-sm font-semibold">Search Scope</div>
                       <div className="grid gap-3 lg:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="jobs-search-mode">Search mode</Label>
+                          <select
+                            id="jobs-search-mode"
+                            className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                            value={jobsForm.searchMode}
+                            onChange={(event) => {
+                              setJobsForm((prev) => ({
+                                ...prev,
+                                searchMode: normalizeSearchMode(event.target.value)
+                              }));
+                              setJobsFormError(null);
+                            }}
+                          >
+                            {JOB_SEARCH_MODE_OPTIONS.map((value) => (
+                              <option key={value} value={value}>
+                                {value.replace(/_/g, " ")}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="text-[11px] text-muted-foreground">
+                            {jobsForm.searchMode === "broad_discovery"
+                              ? "Broader search, wider query expansion, softer shortlist behavior, and a useful top-N even when ranking signal is imperfect."
+                              : "Stricter matching, tighter shortlist thresholds, and fewer notifications unless candidate confidence is high."}
+                          </div>
+                        </div>
+
                         <div className="space-y-2">
                           <Label htmlFor="jobs-desired-titles">Desired titles</Label>
                           <Textarea

@@ -136,9 +136,11 @@ def test_jobs_digest_v2_accepts_jobs_top_and_generates_llm_artifacts(monkeypatch
     assert debug_payload["notify_followup_spec"]["task_type"] == "notify_v1"
     assert result["next_tasks"][0]["task_type"] == "notify_v1"
     notify_payload = result["next_tasks"][0]["payload_json"]
-    assert "Shortlisted: 2 (collected 44, deduped 19)" in notify_payload["message"]
-    assert "Apply: <https://linkedin.example/jobs/1>" in notify_payload["message"]
-    assert "Mission Control: http://localhost:8000/tasks/task-digest-1/result" in notify_payload["message"]
+    assert "Title: Senior ML Engineer" in notify_payload["message"]
+    assert "Company: Acme" in notify_payload["message"]
+    assert "Salary: USD 180,000 - 220,000" in notify_payload["message"]
+    assert "Link: <https://linkedin.example/jobs/1>" in notify_payload["message"]
+    assert "Title: Machine Learning Engineer" in notify_payload["message"]
     assert "task=task-digest-1" not in notify_payload["message"]
     refs = notify_payload["metadata"]["artifact_references"]
     assert refs["task_id"] == "task-digest-1"
@@ -213,9 +215,10 @@ def test_jobs_digest_v2_retries_and_falls_back_by_default_when_strict_unspecifie
     assert result["debug_json"]["fallback_used"] is True
     assert result["debug_json"]["strict_llm_output"] is False
     notify_payload = result["next_tasks"][0]["payload_json"]
-    assert "Shortlisted: 1 (collected 30, deduped 12)" in notify_payload["message"]
-    assert "Apply: <https://linkedin.example/jobs/1>" in notify_payload["message"]
-    assert "Mission Control: /tasks/task-digest-1/result" in notify_payload["message"]
+    assert "Title: AI Engineer" in notify_payload["message"]
+    assert "Company: Acme" in notify_payload["message"]
+    assert "Salary: Not listed" in notify_payload["message"]
+    assert "Link: <https://linkedin.example/jobs/1>" in notify_payload["message"]
 
 
 def test_jobs_digest_v2_defaults_to_single_retry_for_faster_fallback(monkeypatch) -> None:
@@ -566,8 +569,10 @@ def test_jobs_digest_v2_cleans_placeholder_company_and_prefers_direct_job_link(m
     assert digest_job["source_url"] == "https://www.indeed.com/viewjob?jk=123"
     assert str(digest_job["posted_display"]).startswith("Posted ")
     assert "Unknown company" not in message
-    assert "Apply: <https://www.indeed.com/viewjob?jk=123>" in message
-    assert "Mission Control: /tasks/task-digest-1/result" in message
+    assert "Title: Senior Software Engineer" in message
+    assert "Company: Not listed" in message
+    assert "Salary: Not listed" in message
+    assert "Link: <https://www.indeed.com/viewjob?jk=123>" in message
     assert "Unknown company" not in markdown
 
 
@@ -658,6 +663,75 @@ def test_jobs_digest_v2_empty_shortlist_skips_notify_and_keeps_artifacts(monkeyp
     assert debug_payload["notify_followup_requested"] is False
     assert debug_payload["notify_followup_spec"] is None
     assert result["next_tasks"] == []
+
+
+def test_jobs_digest_v2_preserves_fail_soft_shortlist_context_in_notify_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("USE_LLM", "false")
+    monkeypatch.setattr(
+        jobs_digest_v2,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.shortlist.v1",
+            "ranking_mode": "deterministic_fallback",
+            "fallback_used": True,
+            "llm_failed": True,
+            "shortlist_confidence": "low",
+            "fail_soft_applied": True,
+            "shortlist": [
+                {
+                    "job_id": "j-1",
+                    "canonical_job_key": "job:acme|software engineer|remote",
+                    "title": "Software Engineer",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "source": "linkedin",
+                    "source_url": "https://linkedin.example/jobs/1",
+                    "explanation_summary": "Fallback shortlist candidate.",
+                }
+            ],
+            "jobs_top_artifact": {
+                "artifact_type": "jobs_top.v1",
+                "top_jobs": [
+                    {
+                        "job_id": "j-1",
+                        "canonical_job_key": "job:acme|software engineer|remote",
+                        "title": "Software Engineer",
+                        "company": "Acme",
+                        "location": "Remote",
+                        "source": "linkedin",
+                        "source_url": "https://linkedin.example/jobs/1",
+                        "explanation_summary": "Fallback shortlist candidate.",
+                    }
+                ],
+                "pipeline_counts": {"collected_count": 30, "deduped_count": 12, "scored_count": 8},
+                "ranking_mode": "deterministic_fallback",
+                "fallback_used": True,
+                "llm_failed": True,
+                "shortlist_confidence": "low",
+                "fail_soft_applied": True,
+            },
+            "pipeline_counts": {"collected_count": 30, "deduped_count": 12, "scored_count": 8},
+        },
+    )
+
+    payload = {
+        "pipeline_id": "pipe-digest-fail-soft",
+        "upstream": {"task_id": "short-task", "run_id": "short-run", "task_type": "jobs_shortlist_v1"},
+        "request": {"notify_on_empty": False},
+        "digest_policy": {"llm_enabled": True, "max_items": 5},
+    }
+    result = jobs_digest_v2.execute(_task(payload), db=object())
+    artifact = result["content_json"]
+
+    assert artifact["notify_decision"]["should_notify"] is True
+    assert artifact["shortlist_context"]["ranking_mode"] == "deterministic_fallback"
+    assert artifact["shortlist_context"]["fallback_used"] is True
+    assert artifact["shortlist_context"]["fail_soft_applied"] is True
+    notify_payload = result["next_tasks"][0]["payload_json"]
+    assert notify_payload["metadata"]["ranking_mode"] == "deterministic_fallback"
+    assert notify_payload["metadata"]["fallback_used"] is True
+    assert notify_payload["metadata"]["shortlist_confidence"] == "low"
+    assert notify_payload["metadata"]["fail_soft_applied"] is True
 
 
 def test_jobs_digest_v2_fallback_output_shape_is_ui_stable(monkeypatch, jobs_v2_samples) -> None:

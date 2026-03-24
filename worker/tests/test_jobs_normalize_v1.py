@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -231,6 +232,142 @@ def test_jobs_normalize_v1_empty_raw_jobs_keeps_contract(monkeypatch) -> None:
     assert artifact["jobs_deduped_artifact"]["jobs"] == []
     assert artifact["normalized_jobs"] == []
     assert result["next_tasks"][0]["task_type"] == "jobs_rank_v1"
+
+
+def test_jobs_normalize_v1_filters_senior_roles_before_dedupe_for_entry_requests(monkeypatch) -> None:
+    monkeypatch.setattr(
+        jobs_normalize_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.collect.v1",
+            "collection_summary": {
+                "discovered_raw_count": 3,
+                "kept_after_basic_filter_count": 3,
+                "dropped_by_basic_filter_count": 0,
+            },
+            "raw_jobs": [
+                {
+                    "source": "linkedin",
+                    "title": "Senior Software Engineer",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "url": "https://example.test/jobs/1",
+                },
+                {
+                    "source": "indeed",
+                    "title": "Software Engineer I",
+                    "company": "Beta",
+                    "location": "Remote",
+                    "url": "https://example.test/jobs/2",
+                },
+                {
+                    "source": "glassdoor",
+                    "title": "Associate Software Engineer",
+                    "company": "Gamma",
+                    "location": "Remote",
+                    "url": "https://example.test/jobs/3",
+                },
+            ],
+            "warnings": [],
+        },
+    )
+
+    result = jobs_normalize_v1.execute(
+        _task(
+            {
+                "pipeline_id": "pipe-norm-entry-filter",
+                "upstream": {"task_id": "collect-task", "run_id": "collect-run", "task_type": "jobs_collect_v1"},
+                "request": {"query": "software engineer", "experience_level": "entry"},
+            }
+        ),
+        db=object(),
+    )
+
+    artifact = result["content_json"]
+    kept_titles = [row["title"] for row in artifact["normalized_jobs"]]
+
+    assert artifact["experience_filter_applied"] is True
+    assert artifact["counts"]["filtered_out_by_experience_count"] == 1
+    assert artifact["counts"]["kept_after_experience_filter_count"] == 2
+    assert "Senior Software Engineer" not in kept_titles
+    assert kept_titles == ["Software Engineer I", "Associate Software Engineer"]
+    assert artifact["counts"]["deduped_count"] == 2
+    assert result["debug_json"]["experience_filter_applied"] is True
+    assert result["debug_json"]["filtered_out_by_experience_count"] == 1
+    assert result["debug_json"]["kept_after_experience_filter_count"] == 2
+    assert result["next_tasks"][0]["task_type"] == "jobs_rank_v1"
+    assert result["next_tasks"][0]["payload_json"]["request"]["experience_level"] == "entry"
+
+
+def test_jobs_normalize_v1_drops_old_and_undated_jobs_before_ranking_when_prefer_recent(monkeypatch) -> None:
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    recent_posted_at = (now_utc - timedelta(days=3)).isoformat().replace("+00:00", "Z")
+    stale_posted_at = (now_utc - timedelta(days=28)).isoformat().replace("+00:00", "Z")
+
+    monkeypatch.setattr(
+        jobs_normalize_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.collect.v1",
+            "collection_summary": {
+                "discovered_raw_count": 3,
+                "kept_after_basic_filter_count": 3,
+                "dropped_by_basic_filter_count": 0,
+            },
+            "raw_jobs": [
+                {
+                    "source": "linkedin",
+                    "title": "Software Engineer",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "posted_at": recent_posted_at,
+                    "url": "https://example.test/jobs/1",
+                },
+                {
+                    "source": "indeed",
+                    "title": "Software Engineer II",
+                    "company": "Beta",
+                    "location": "Remote",
+                    "posted_at": stale_posted_at,
+                    "url": "https://example.test/jobs/2",
+                },
+                {
+                    "source": "glassdoor",
+                    "title": "Software Developer",
+                    "company": "Gamma",
+                    "location": "Remote",
+                    "posted_at": None,
+                    "url": "https://example.test/jobs/3",
+                },
+            ],
+            "warnings": [],
+        },
+    )
+
+    result = jobs_normalize_v1.execute(
+        _task(
+            {
+                "pipeline_id": "pipe-norm-recency-filter",
+                "upstream": {"task_id": "collect-task", "run_id": "collect-run", "task_type": "jobs_collect_v1"},
+                "request": {"query": "software engineer", "prefer_recent": True},
+            }
+        ),
+        db=object(),
+    )
+
+    artifact = result["content_json"]
+    kept_titles = [row["title"] for row in artifact["normalized_jobs"]]
+
+    assert artifact["recency_filter_applied"] is True
+    assert artifact["counts"]["dropped_old_jobs_count"] == 2
+    assert artifact["counts"]["kept_after_recency_filter_count"] == 1
+    assert artifact["counts"]["average_job_age_days"] == 3.0
+    assert artifact["counts"]["oldest_job_age"] == 3
+    assert kept_titles == ["Software Engineer"]
+    assert result["debug_json"]["recency_filter_applied"] is True
+    assert result["debug_json"]["dropped_old_jobs_count"] == 2
+    assert result["debug_json"]["average_job_age_days"] == 3.0
+    assert result["next_tasks"][0]["payload_json"]["request"]["prefer_recent"] is True
 
 
 def test_jobs_normalize_v1_same_run_duplicates_still_collapse_with_canonical_key(monkeypatch) -> None:

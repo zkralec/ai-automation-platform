@@ -530,12 +530,13 @@ def test_jobs_v2_end_to_end_empty_shortlist_keeps_diagnosable_artifacts(worker_m
             "result_limit_per_source": 100,
             "max_queries_per_run": 8,
             "max_pages_per_source": 4,
-            "max_total_jobs": 200,
-            "shortlist_count": 3,
-            "shortlist_min_score": 99,
-            "jobs_notification_cooldown_days": 7,
-        },
-    }
+                "max_total_jobs": 200,
+                "shortlist_count": 3,
+                "shortlist_min_score": 99,
+                "shortlist_fail_soft_enabled": False,
+                "jobs_notification_cooldown_days": 7,
+            },
+        }
 
     seen_task_ids: set[str] = set()
     collect_task_id = _seed_task(worker_module, task_type="jobs_collect_v1", payload=payload)

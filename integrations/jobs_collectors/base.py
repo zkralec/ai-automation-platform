@@ -333,7 +333,13 @@ def _split_warnings_and_errors(board: str, messages: list[str]) -> tuple[list[st
             continue
         low = text.lower()
         prefixed = text if low.startswith(f"{board}:") else f"{board}: {text}"
-        if "fetch_failed" in low or "unsupported_board" in low:
+        if (
+            "fetch_failed" in low
+            or "fetch_blocked_" in low
+            or "fetch_not_found_" in low
+            or "fetch_http_" in low
+            or "unsupported_board" in low
+        ):
             errors.append(prefixed)
         else:
             warnings.append(prefixed)
@@ -518,11 +524,20 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
                 "expansion_type": expansion_type,
                 "query_index": query_index,
                 "pages_fetched": int(board_meta.get("pages_fetched") or 0),
+                "pages_attempted": int(board_meta.get("pages_attempted") or board_meta.get("pages_fetched") or 0),
                 "pages_with_results": int(board_meta.get("pages_with_results") or 0),
                 "discovered_raw_count": int(board_meta.get("discovered_raw_count") or len(jobs)),
                 "jobs_found": len(jobs),
                 "new_unique_jobs": new_unique_candidates,
                 "stop_reason": str(board_meta.get("stop_reason") or ""),
+                "request_urls_tried": list(board_meta.get("request_urls_tried") or []),
+                "last_request_url": str(board_meta.get("last_request_url") or "").strip() or None,
+                "error_type": str(board_meta.get("error_type") or "").strip() or None,
+                "error_status": (
+                    int(board_meta.get("error_status"))
+                    if isinstance(board_meta.get("error_status"), int)
+                    else None
+                ),
             }
         )
 
@@ -595,6 +610,13 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
         row["deduped_count"] = deduped_by_query.get(key, 0)
         row["returned_count"] = collected_by_query.get(key, 0)
 
+    request_urls_tried: list[str] = []
+    for row in search_attempts:
+        values = row.get("request_urls_tried") if isinstance(row.get("request_urls_tried"), list) else []
+        for value in values:
+            if isinstance(value, str) and value.strip() and value.strip() not in request_urls_tried:
+                request_urls_tried.append(value.strip())
+
     status = "success"
     if errors and collected:
         status = "partial_success"
@@ -630,11 +652,37 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
             "truncated_by_source_limit_count": truncated_by_source_limit_count,
             "returned_count": len(collected),
             "pages_fetched": pages_fetched,
+            "pages_attempted": pages_fetched,
             "jobs_found_per_query": jobs_found_per_query,
             "jobs_found_per_source": len(collected),
             "query_examples": [row.get("query") for row in query_plan[:5] if isinstance(row.get("query"), str)],
             "company_frequency": _company_frequency(collected),
             "search_attempts": search_attempts,
+            "request_urls_tried": request_urls_tried,
+            "last_request_url": next(
+                (
+                    row.get("last_request_url")
+                    for row in reversed(search_attempts)
+                    if isinstance(row.get("last_request_url"), str) and str(row.get("last_request_url")).strip()
+                ),
+                None,
+            ),
+            "error_type": next(
+                (
+                    row.get("error_type")
+                    for row in reversed(search_attempts)
+                    if isinstance(row.get("error_type"), str) and str(row.get("error_type")).strip()
+                ),
+                None,
+            ),
+            "error_status": next(
+                (
+                    row.get("error_status")
+                    for row in reversed(search_attempts)
+                    if isinstance(row.get("error_status"), int)
+                ),
+                None,
+            ),
             "basic_filter_mode": "minimal_exclude_only",
             "metadata_completeness_summary": metadata_completeness_summary,
         },

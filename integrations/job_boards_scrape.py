@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from html import unescape
 import re
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 
 from integrations.scrape_common import (
@@ -72,10 +74,13 @@ _JOB_URL_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "glassdoor": (
         re.compile(r"glassdoor\.com/.+?-job-listing-", re.IGNORECASE),
         re.compile(r"/Job/.+?-job-listing-", re.IGNORECASE),
+        re.compile(r"glassdoor\.com/partner/jobListing\.htm", re.IGNORECASE),
+        re.compile(r"/partner/jobListing\.htm", re.IGNORECASE),
     ),
     "handshake": (
         re.compile(r"joinhandshake\.com/.*/jobs/", re.IGNORECASE),
         re.compile(r"/jobs/[0-9]+", re.IGNORECASE),
+        re.compile(r"/stu/jobs/[0-9]+", re.IGNORECASE),
     ),
 }
 
@@ -84,6 +89,22 @@ _BOARD_BASE_URLS = {
     "indeed": "https://www.indeed.com",
     "glassdoor": "https://www.glassdoor.com",
     "handshake": "https://joinhandshake.com",
+}
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+)
+_BOARD_REFERERS = {
+    "linkedin": "https://www.linkedin.com/jobs/search/",
+    "indeed": "https://www.indeed.com/",
+    "glassdoor": "https://www.glassdoor.com/",
+    "handshake": "https://joinhandshake.com/",
+}
+_BOARD_RATE_LIMIT_SECONDS = {
+    "linkedin": 2.0,
+    "indeed": 4.0,
+    "glassdoor": 4.0,
+    "handshake": 3.0,
 }
 
 _RELATIVE_POSTED_AT_RE = re.compile(
@@ -271,6 +292,28 @@ def _replace_query_params(url: str, params: dict[str, str]) -> str:
     return urlunsplit(parts._replace(query=urlencode(query_items, doseq=True)))
 
 
+def _compact_text(value: str) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _strip_location_suffix(query: str, location: str) -> str:
+    normalized_query = _compact_text(query)
+    normalized_location = _compact_text(location)
+    if not normalized_query or not normalized_location:
+        return normalized_query
+    if normalized_query.lower().endswith(normalized_location.lower()):
+        trimmed = normalized_query[: -len(normalized_location)].rstrip(" ,-")
+        return _compact_text(trimmed)
+    return normalized_query
+
+
+def _sanitize_search_terms(board: str, *, query: str, location: str) -> tuple[str, str]:
+    del board
+    normalized_query = _strip_location_suffix(query, location)
+    normalized_location = _compact_text(location)
+    return normalized_query or _compact_text(query), normalized_location
+
+
 def _page_url_for_board(board: str, *, search_url: str, page_index: int) -> str:
     if page_index <= 0:
         return search_url
@@ -286,21 +329,88 @@ def _page_url_for_board(board: str, *, search_url: str, page_index: int) -> str:
 
 
 def _build_board_search_url(board: str, *, query: str, location: str, page_index: int = 0) -> str:
-    q = quote_plus(query or "")
-    loc = quote_plus(location or "")
+    query_value, location_value = _sanitize_search_terms(board, query=query, location=location)
+    q = quote_plus(query_value or "")
+    loc = quote_plus(location_value or "")
     if board == "linkedin":
-        search_url = f"https://www.linkedin.com/jobs/search/?keywords={q}&location={loc}"
+        search_url = (
+            "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+            f"?keywords={q}&location={loc}"
+        )
         return _page_url_for_board(board, search_url=search_url, page_index=page_index)
     if board == "indeed":
-        search_url = f"https://www.indeed.com/jobs?q={q}&l={loc}"
+        search_url = f"https://www.indeed.com/jobs?q={q}&l={loc}&from=searchOnHP&sort=date"
         return _page_url_for_board(board, search_url=search_url, page_index=page_index)
     if board == "glassdoor":
-        search_url = f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}"
+        if loc:
+            search_url = f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}&locKeyword={loc}"
+        else:
+            search_url = f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}"
         return _page_url_for_board(board, search_url=search_url, page_index=page_index)
     if board == "handshake":
-        search_url = f"https://joinhandshake.com/students/jobs/search?query={q}"
+        search_url = f"https://app.joinhandshake.com/stu/postings?query={q}"
         return _page_url_for_board(board, search_url=search_url, page_index=page_index)
     raise ValueError(f"Unsupported board '{board}'")
+
+
+def _candidate_search_urls(board: str, *, query: str, location: str, page_index: int = 0) -> list[str]:
+    query_value, location_value = _sanitize_search_terms(board, query=query, location=location)
+    q = quote_plus(query_value or "")
+    loc = quote_plus(location_value or "")
+    candidates: list[str] = []
+
+    def add(url: str) -> None:
+        if url and url not in candidates:
+            candidates.append(url)
+
+    if board == "linkedin":
+        add(_build_board_search_url(board, query=query_value, location=location_value, page_index=page_index))
+        legacy_url = _page_url_for_board(
+            board,
+            search_url=f"https://www.linkedin.com/jobs/search/?keywords={q}&location={loc}",
+            page_index=page_index,
+        )
+        add(legacy_url)
+        return candidates
+    if board == "indeed":
+        add(_build_board_search_url(board, query=query_value, location=location_value, page_index=page_index))
+        add(_page_url_for_board(board, search_url=f"https://www.indeed.com/jobs?q={q}&l={loc}", page_index=page_index))
+        add(_page_url_for_board(board, search_url=f"https://www.indeed.com/m/jobs?q={q}&l={loc}", page_index=page_index))
+        return candidates
+    if board == "glassdoor":
+        add(_build_board_search_url(board, query=query_value, location=location_value, page_index=page_index))
+        add(_page_url_for_board(board, search_url=f"https://www.glassdoor.com/Job/jobs.htm?sc.keyword={q}", page_index=page_index))
+        return candidates
+    if board == "handshake":
+        add(_build_board_search_url(board, query=query_value, location=location_value, page_index=page_index))
+        add(_page_url_for_board(board, search_url=f"https://joinhandshake.com/students/jobs/search/?query={q}", page_index=page_index))
+        return candidates
+    add(_build_board_search_url(board, query=query_value, location=location_value, page_index=page_index))
+    return candidates
+
+
+def _request_options_for_board(board: str, *, search_url: str) -> dict[str, Any]:
+    headers = {
+        "User-Agent": _BROWSER_USER_AGENT,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": _BOARD_REFERERS.get(board, search_url),
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    return {
+        "extra_headers": headers,
+        "rate_limit_seconds": _BOARD_RATE_LIMIT_SECONDS.get(board, 2.0),
+    }
+
+
+def _error_details(exc: Exception) -> tuple[str, int | None]:
+    if isinstance(exc, HTTPError):
+        if exc.code == 403:
+            return "fetch_blocked_403", 403
+        if exc.code == 404:
+            return "fetch_not_found_404", 404
+        return f"fetch_http_{exc.code}", int(exc.code)
+    return type(exc).__name__, None
 
 
 def _is_job_url_for_board(board: str, url: str) -> bool:
@@ -339,7 +449,7 @@ def _extract_jobs_from_html(board_key: str, *, html_text: str, base_url: str, se
         if not raw_title or len(raw_title) < 4:
             continue
 
-        href = (match.group("href") or "").strip()
+        href = unescape((match.group("href") or "").strip())
         if not href:
             continue
         url = absolute_url(base_url, href)
@@ -409,7 +519,7 @@ def collect_jobs_from_board(
         }
 
     base_url = _BOARD_BASE_URLS[board_key]
-    base_search_url = (str(url_override or "").strip() or _build_board_search_url(board_key, query=query, location=location))
+    base_search_url = str(url_override or "").strip() or None
     warnings: list[str] = []
     jobs: list[dict[str, Any]] = []
     seen_unique: set[tuple[str, str, str]] = set()
@@ -419,22 +529,69 @@ def collect_jobs_from_board(
     pages_with_results = 0
     discovered_raw_count = 0
     stop_reason = "max_pages_reached"
+    request_attempts: list[dict[str, Any]] = []
+    request_urls_tried: list[str] = []
+    last_request_url: str | None = None
+    error_type: str | None = None
+    error_status: int | None = None
 
     for page_index in range(max_page_count):
-        search_url = _page_url_for_board(
-            board_key,
-            search_url=base_search_url,
-            page_index=page_index,
+        candidate_urls = (
+            [_page_url_for_board(board_key, search_url=base_search_url, page_index=page_index)]
+            if base_search_url
+            else _candidate_search_urls(board_key, query=query, location=location, page_index=page_index)
         )
-        pages_fetched += 1
-        try:
-            html_text = fetch_html(search_url)
-        except Exception as exc:
-            return jobs, [f"{board_key}: fetch_failed url={search_url} error={type(exc).__name__}: {exc}"], {
+        html_text = None
+        search_url = None
+        page_errors: list[str] = []
+
+        for candidate_index, candidate_url in enumerate(candidate_urls, start=1):
+            pages_fetched += 1
+            request_urls_tried.append(candidate_url)
+            last_request_url = candidate_url
+            try:
+                html_text = fetch_html(candidate_url, **_request_options_for_board(board_key, search_url=candidate_url))
+                search_url = candidate_url
+                request_attempts.append(
+                    {
+                        "page_index": page_index + 1,
+                        "candidate_index": candidate_index,
+                        "url": candidate_url,
+                        "status": "ok",
+                    }
+                )
+                break
+            except Exception as exc:
+                error_type, error_status = _error_details(exc)
+                request_attempts.append(
+                    {
+                        "page_index": page_index + 1,
+                        "candidate_index": candidate_index,
+                        "url": candidate_url,
+                        "status": "error",
+                        "error_type": error_type,
+                        "error_status": error_status,
+                    }
+                )
+                page_errors.append(
+                    f"{board_key}: {error_type} url={candidate_url} error={type(exc).__name__}: {exc}"
+                )
+                if candidate_index == len(candidate_urls):
+                    stop_reason = error_type
+                continue
+
+        if html_text is None or search_url is None:
+            return jobs, page_errors or [f"{board_key}: fetch_failed"], {
                 "discovered_raw_count": discovered_raw_count,
                 "pages_fetched": pages_fetched,
+                "pages_attempted": pages_fetched,
                 "pages_with_results": pages_with_results,
-                "stop_reason": "fetch_failed",
+                "request_attempts": request_attempts,
+                "request_urls_tried": request_urls_tried,
+                "last_request_url": last_request_url,
+                "error_type": error_type,
+                "error_status": error_status,
+                "stop_reason": stop_reason,
             }
 
         page_jobs = _extract_jobs_from_html(
@@ -472,7 +629,13 @@ def collect_jobs_from_board(
     return jobs, warnings, {
         "discovered_raw_count": discovered_raw_count,
         "pages_fetched": pages_fetched,
+        "pages_attempted": pages_fetched,
         "pages_with_results": pages_with_results,
+        "request_attempts": request_attempts,
+        "request_urls_tried": request_urls_tried,
+        "last_request_url": last_request_url,
+        "error_type": error_type,
+        "error_status": error_status,
         "stop_reason": stop_reason,
     }
 

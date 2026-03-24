@@ -360,6 +360,12 @@ function JobsStagePreview({
   resultPayload: unknown;
   taskId?: string | null;
 }): JSX.Element | null {
+  const jobsSearchMode = (() => {
+    const artifact = isRecord(resultPayload) ? resultPayload : {};
+    const request = isRecord(artifact.request) ? artifact.request : {};
+    return asText(artifact.search_mode) || asText(request.search_mode) || null;
+  })();
+
   if (taskType === "jobs_collect_v1" || taskType === "jobs_normalize_v1") {
     const observability =
       taskType === "jobs_collect_v1"
@@ -415,6 +421,13 @@ function JobsStagePreview({
             </div>
           ))}
         </div>
+
+        {jobsSearchMode ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+            <div className="mt-1">{jobsSearchMode.replace(/_/g, " ")}</div>
+          </div>
+        ) : null}
 
         <div className="rounded border border-border bg-card p-3">
           <div className="mb-2 text-xs font-medium uppercase tracking-[0.06em] text-muted-foreground">By Source</div>
@@ -515,6 +528,12 @@ function JobsStagePreview({
             <div className="mt-1">{asText(debug.prompt_version) || asText(rankPolicy.prompt_version) || "-"}</div>
           </div>
         </div>
+        {jobsSearchMode ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+            <div className="mt-1">{jobsSearchMode.replace(/_/g, " ")}</div>
+          </div>
+        ) : null}
         {rankedJobs.length > 0 ? (
           <div className="space-y-2 rounded border border-border bg-card p-3">
             {rankedJobs.slice(0, 5).map((row, idx) => (
@@ -564,6 +583,12 @@ function JobsStagePreview({
           <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">History / Repeat Behavior</div>
           <div className="mt-1">{historyBits}</div>
         </div>
+        {jobsSearchMode ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+            <div className="mt-1">{jobsSearchMode.replace(/_/g, " ")}</div>
+          </div>
+        ) : null}
         {shortlist.length > 0 ? (
           <div className="space-y-2 rounded border border-border bg-card p-3">
             {shortlist.slice(0, 5).map((row, idx) => (
@@ -619,6 +644,12 @@ function JobsStagePreview({
             <div className="mt-1">{`fallback ${asText(llmMeta.fallback_used) || "false"} · strict ${asText(llmMeta.strict_failure) || "false"}`}</div>
           </div>
         </div>
+        {jobsSearchMode ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+            <div className="mt-1">{jobsSearchMode.replace(/_/g, " ")}</div>
+          </div>
+        ) : null}
         {(asText(artifact.summary) || asText(artifact.notification_excerpt)) ? (
           <div className="rounded border border-border bg-card p-3 text-xs leading-relaxed">
             {asText(artifact.summary) || asText(artifact.notification_excerpt)}

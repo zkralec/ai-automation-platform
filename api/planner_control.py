@@ -729,6 +729,7 @@ def ensure_rtx5090_deals_template(
 def ensure_jobs_digest_template(
     *,
     interval_seconds: int = 300,
+    search_mode: str | None = None,
     desired_title: str | None = None,
     desired_titles: list[str] | None = None,
     keywords: list[str] | None = None,
@@ -756,6 +757,7 @@ def ensure_jobs_digest_template(
     allowed_sources = {"linkedin", "indeed", "glassdoor", "handshake"}
     allowed_work_modes = {"remote", "hybrid", "onsite"}
     allowed_freshness = {"off", "prefer_recent", "strong_prefer_recent"}
+    allowed_search_modes = {"broad_discovery", "precision_match"}
 
     def _normalize_text_list(values: list[str] | None, *, lower: bool = False) -> list[str]:
         output: list[str] = []
@@ -797,6 +799,9 @@ def ensure_jobs_digest_template(
         return None
 
     safe_interval = max(int(interval_seconds), 60)
+    normalized_search_mode = str(search_mode or "broad_discovery").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized_search_mode not in allowed_search_modes:
+        normalized_search_mode = "broad_discovery"
     title_list = _normalize_text_list(desired_titles)
     if isinstance(desired_title, str) and desired_title.strip():
         desired_title_text = desired_title.strip()
@@ -846,7 +851,8 @@ def ensure_jobs_digest_template(
         safe_boards = ["linkedin", "indeed", "glassdoor", "handshake"]
 
     max_jobs = max(1, min(int(result_limit_per_source or 250), 1000))
-    max_queries = max(1, min(int(max_queries_per_run or 12), 20))
+    max_queries_default = 14 if normalized_search_mode == "broad_discovery" else 8
+    max_queries = max(1, min(int(max_queries_per_run or max_queries_default), 20))
     shortlist_size = max(1, min(int(shortlist_count or 10), 10))
     freshness = str(freshness_preference or "off").strip().lower().replace("-", "_").replace(" ", "_")
     if freshness not in allowed_freshness:
@@ -863,13 +869,14 @@ def ensure_jobs_digest_template(
     request_obj: dict[str, Any] = {
         "query": title_list[0],
         "location": location_list[0],
+        "search_mode": normalized_search_mode,
         "collectors_enabled": True,
         "sources": safe_boards,
         "enabled_sources": safe_boards,
         "max_jobs_per_source": max_jobs,
         "result_limit_per_source": max_jobs,
         "max_queries_per_run": max_queries,
-        "enable_query_expansion": True,
+        "enable_query_expansion": normalized_search_mode == "broad_discovery",
         "profile_mode": "resume_profile",
         "titles": title_list,
         "desired_title_keywords": title_list,
@@ -889,6 +896,9 @@ def ensure_jobs_digest_template(
         "jobs_notification_cooldown_days": cooldown_days,
         "jobs_shortlist_repeat_penalty": repeat_penalty,
         "resurface_seen_jobs": resurface_seen,
+        "shortlist_min_score": 0.5 if normalized_search_mode == "broad_discovery" else 0.85,
+        "shortlist_fail_soft_enabled": normalized_search_mode == "broad_discovery",
+        "shortlist_fallback_min_items": 5 if normalized_search_mode == "broad_discovery" else 0,
         "notify_on_empty": True,
         "payload_nonce": "{{uuid4}}",
     }

@@ -406,7 +406,7 @@ def _normalize_top_jobs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalized
 
 
-def _extract_top_jobs_and_counts(upstream_result: dict[str, Any]) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+def _extract_top_jobs_and_counts(upstream_result: dict[str, Any]) -> tuple[str, list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     artifact_type = str(upstream_result.get("artifact_type") or "").strip()
     if artifact_type == "jobs.shortlist.v1":
         jobs_top_artifact = upstream_result.get("jobs_top_artifact") if isinstance(upstream_result.get("jobs_top_artifact"), dict) else {}
@@ -430,7 +430,21 @@ def _extract_top_jobs_and_counts(upstream_result: dict[str, Any]) -> tuple[str, 
             if input_scored_count is not None:
                 pipeline_counts["scored_count"] = input_scored_count
 
-        return artifact_type, _normalize_top_jobs(top_jobs), pipeline_counts
+        shortlist_context = {
+            "ranking_mode": upstream_result.get("ranking_mode") or jobs_top_artifact.get("ranking_mode"),
+            "fallback_used": upstream_result.get("fallback_used"),
+            "llm_failed": upstream_result.get("llm_failed"),
+            "shortlist_confidence": upstream_result.get("shortlist_confidence") or jobs_top_artifact.get("shortlist_confidence"),
+            "fail_soft_applied": upstream_result.get("fail_soft_applied"),
+        }
+        if shortlist_context["fallback_used"] is None:
+            shortlist_context["fallback_used"] = jobs_top_artifact.get("fallback_used")
+        if shortlist_context["llm_failed"] is None:
+            shortlist_context["llm_failed"] = jobs_top_artifact.get("llm_failed")
+        if shortlist_context["fail_soft_applied"] is None:
+            shortlist_context["fail_soft_applied"] = jobs_top_artifact.get("fail_soft_applied")
+
+        return artifact_type, _normalize_top_jobs(top_jobs), pipeline_counts, shortlist_context
 
     if artifact_type == "jobs_top.v1":
         top_jobs = upstream_result.get("top_jobs")
@@ -444,7 +458,14 @@ def _extract_top_jobs_and_counts(upstream_result: dict[str, Any]) -> tuple[str, 
         ):
             if isinstance(candidate, dict):
                 pipeline_counts.update(candidate)
-        return artifact_type, _normalize_top_jobs(top_jobs), pipeline_counts
+        shortlist_context = {
+            "ranking_mode": upstream_result.get("ranking_mode"),
+            "fallback_used": upstream_result.get("fallback_used"),
+            "llm_failed": upstream_result.get("llm_failed"),
+            "shortlist_confidence": upstream_result.get("shortlist_confidence"),
+            "fail_soft_applied": upstream_result.get("fail_soft_applied"),
+        }
+        return artifact_type, _normalize_top_jobs(top_jobs), pipeline_counts, shortlist_context
 
     raise NonRetryableTaskError(
         "upstream contract mismatch: jobs_digest_v2 expects artifact_type "
@@ -925,54 +946,23 @@ def _build_discord_digest_message(
     pipeline_counts: dict[str, int | None],
     artifact_refs: dict[str, Any],
 ) -> str:
-    summary = report.get("executive_summary") if isinstance(report.get("executive_summary"), dict) else {}
     jobs = report.get("jobs") if isinstance(report.get("jobs"), list) else []
-    headline = _compact_text(summary.get("summary_text"), 200) or "Jobs digest generated."
-
-    shortlisted_count = pipeline_counts.get("shortlisted_count")
-    if shortlisted_count is None:
-        shortlisted_count = len(jobs)
-    collected_count = pipeline_counts.get("collected_count")
-    deduped_count = pipeline_counts.get("deduped_count")
-
-    count_line = f"Shortlisted: {shortlisted_count}"
-    if collected_count is not None and deduped_count is not None:
-        count_line += f" (collected {collected_count}, deduped {deduped_count})"
-    elif deduped_count is not None:
-        count_line += f" (deduped {deduped_count})"
-
-    lines = [
-        "**Jobs Digest**",
-        headline,
-        count_line,
-    ]
+    del pipeline_counts, artifact_refs
+    lines: list[str] = []
 
     if jobs:
-        lines.append("Top roles:")
         for row in _showcase_jobs(jobs, limit=3):
-            heading = _compact_text(_job_heading(row), 90)
-            source = _source_label(row.get("source"))
-            posted = _posted_display(row)
-            reason = _compact_text(_job_reason(row), 100)
-            meta_parts = [part for part in (f"via {source}" if source else "", posted) if part]
-            line = f"{row.get('rank')}. {heading}"
-            if meta_parts:
-                line = f"{line} ({' · '.join(meta_parts)})"
-            lines.append(line)
-            if reason:
-                lines.append(f"Why: {reason}")
+            title = _compact_text(row.get("title") or "Unknown role", 120) or "Unknown role"
+            company = _clean_company(row.get("company")) or "Not listed"
+            salary = _compact_text(row.get("salary") or _salary_text(row), 120) or "Not listed"
             job_link = _preferred_job_link(row)
-            if job_link:
-                lines.append(f"Apply: <{job_link}>")
+            lines.append(f"Title: {title}")
+            lines.append(f"Company: {company}")
+            lines.append(f"Salary: {salary}")
+            lines.append(f"Link: <{job_link}>" if job_link else "Link: Not listed")
+            lines.append("")
     else:
         lines.append("No shortlist items matched this run.")
-
-    result_url = artifact_refs.get("result_url")
-    result_path = artifact_refs.get("result_path")
-    if isinstance(result_url, str) and result_url.strip():
-        lines.append(f"Mission Control: {result_url}")
-    elif isinstance(result_path, str) and result_path.strip():
-        lines.append(f"Mission Control: {result_path}")
 
     return _truncate_multiline(lines, 1800)
 
@@ -984,7 +974,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
     pipeline_id = new_pipeline_id(payload.get("pipeline_id"))
 
     upstream_result = fetch_upstream_result_content_json(db, upstream)
-    upstream_type, extracted_jobs, raw_pipeline_counts = _extract_top_jobs_and_counts(upstream_result)
+    upstream_type, extracted_jobs, raw_pipeline_counts, shortlist_context = _extract_top_jobs_and_counts(upstream_result)
 
     digest_policy = payload.get("digest_policy") if isinstance(payload.get("digest_policy"), dict) else {}
     try:
@@ -1170,6 +1160,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "file_name": "jobs_digest.json",
         "pipeline_id": pipeline_id,
         "generated_at": utc_iso(),
+        "search_mode": str(request.get("search_mode") or ""),
         "generation_mode": generation_mode,
         "digest_format": digest_format,
         "executive_summary": summary_object,
@@ -1207,6 +1198,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "file_name": "jobs_digest.md",
         "pipeline_id": pipeline_id,
         "generated_at": utc_iso(),
+        "search_mode": str(request.get("search_mode") or ""),
         "generation_mode": generation_mode,
         "digest_format": digest_format,
         "content": markdown_report,
@@ -1227,7 +1219,13 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 "pipeline_id": pipeline_id,
                 "shortlist_count": len(top_jobs),
                 "digest_format": digest_format,
+                "search_mode": str(request.get("search_mode") or ""),
                 "generation_mode": generation_mode,
+                "ranking_mode": shortlist_context.get("ranking_mode"),
+                "fallback_used": shortlist_context.get("fallback_used"),
+                "llm_failed": shortlist_context.get("llm_failed"),
+                "shortlist_confidence": shortlist_context.get("shortlist_confidence"),
+                "fail_soft_applied": shortlist_context.get("fail_soft_applied"),
                 "artifact_references": artifact_refs,
                 "jobs_history_updates": [
                     {
@@ -1248,6 +1246,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "artifact_schema": "jobs.digest.v3",
         "pipeline_id": pipeline_id,
         "digested_at": utc_iso(),
+        "search_mode": str(request.get("search_mode") or ""),
         "request": request,
         "digest_policy": {
             "max_items": max_items,
@@ -1273,6 +1272,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "next_actions": next_actions,
         "notification_excerpt": jobs_digest_json_artifact["notification_excerpt"],
         "generation_mode": generation_mode,
+        "shortlist_context": shortlist_context,
         "model_usage": llm_meta,
         "warnings": llm_warnings,
         "notify_decision": {
@@ -1319,6 +1319,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "strict_mode_failed": llm_meta.get("strict_failure"),
             "ai_usage_task_run_ids": llm_meta.get("ai_usage_task_run_ids"),
             "generation_mode": generation_mode,
+            "shortlist_context": shortlist_context,
         },
         "next_tasks": next_tasks,
     }

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import re
 from typing import Any
 
 from task_handlers.jobs_normalize_helpers import dedupe_normalized_jobs, normalize_jobs
@@ -224,6 +226,76 @@ def _strip_internal_keys(job: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in job.items() if not key.startswith("_")}
 
 
+_SENIOR_TITLE_KEYWORD_RE = re.compile(r"\b(senior|sr|lead|staff|principal|manager)\b", re.IGNORECASE)
+
+
+def _requested_experience_level(request: dict[str, Any]) -> str:
+    explicit = str(request.get("experience_level") or "").strip().lower()
+    if explicit:
+        return "entry" if explicit in {"entry-level", "entry level", "junior", "new grad", "associate"} else explicit
+
+    values = request.get("experience_levels")
+    if isinstance(values, list):
+        for value in values:
+            text = str(value or "").strip().lower()
+            if text:
+                return "entry" if text in {"entry-level", "entry level", "junior", "new grad", "associate"} else text
+    return ""
+
+
+def matches_experience_level(job: dict[str, Any], requested_level: str) -> bool:
+    level = str(job.get("experience_level") or "").strip().lower()
+    title = str(job.get("title") or "").strip().lower()
+
+    if requested_level == "entry":
+        if level == "senior":
+            return False
+        return _SENIOR_TITLE_KEYWORD_RE.search(title) is None
+
+    return True
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _job_age_days(posted_at: Any, *, now_utc: datetime | None = None) -> int | None:
+    parsed = _parse_datetime(posted_at)
+    if parsed is None:
+        return None
+    now = now_utc or datetime.now(timezone.utc)
+    delta = now - parsed
+    return max(int(delta.total_seconds() // 86400), 0)
+
+
+def _prefer_recent_enabled(request: dict[str, Any]) -> bool:
+    if bool(request.get("prefer_recent")):
+        return True
+    freshness = str(request.get("shortlist_freshness_preference") or "").strip().lower()
+    return freshness in {"prefer_recent", "strong_prefer_recent"}
+
+
+def is_recent(posted_at: Any, max_age_days: int, *, now_utc: datetime | None = None) -> bool:
+    age_days = _job_age_days(posted_at, now_utc=now_utc)
+    if age_days is None:
+        return False
+    return age_days <= max_age_days
+
+
 def execute(task: Any, db: Any) -> dict[str, Any]:
     payload = payload_object(task.payload_json)
     upstream = payload.get("upstream") if isinstance(payload.get("upstream"), dict) else {}
@@ -239,6 +311,37 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         upstream_result.get("collection_summary") if isinstance(upstream_result.get("collection_summary"), dict) else {}
     )
     normalized_jobs, drop_reasons = normalize_jobs(raw_jobs)
+    requested_experience_level = _requested_experience_level(request)
+    experience_filter_applied = bool(requested_experience_level)
+    filtered_out_by_experience_count = 0
+    if experience_filter_applied:
+        filtered_normalized_jobs: list[dict[str, Any]] = []
+        for row in normalized_jobs:
+            if matches_experience_level(row, requested_experience_level):
+                filtered_normalized_jobs.append(row)
+            else:
+                filtered_out_by_experience_count += 1
+        normalized_jobs = filtered_normalized_jobs
+    kept_after_experience_filter_count = len(normalized_jobs)
+    recency_filter_applied = _prefer_recent_enabled(request)
+    dropped_old_jobs_count = 0
+    now_utc = datetime.now(timezone.utc)
+    if recency_filter_applied:
+        recent_normalized_jobs: list[dict[str, Any]] = []
+        for row in normalized_jobs:
+            if is_recent(row.get("posted_at"), 14, now_utc=now_utc):
+                recent_normalized_jobs.append(row)
+            else:
+                dropped_old_jobs_count += 1
+        normalized_jobs = recent_normalized_jobs
+    kept_after_recency_filter_count = len(normalized_jobs)
+    remaining_age_days = [
+        age_days
+        for row in normalized_jobs
+        if (age_days := _job_age_days(row.get("posted_at"), now_utc=now_utc)) is not None
+    ]
+    average_job_age_days = round(sum(remaining_age_days) / len(remaining_age_days), 1) if remaining_age_days else 0.0
+    oldest_job_age = max(remaining_age_days) if remaining_age_days else 0
 
     normalization_policy = payload.get("normalization_policy") if isinstance(payload.get("normalization_policy"), dict) else {}
     dedupe_policy = _dedupe_policy(normalization_policy)
@@ -324,6 +427,12 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "counts": {
             "raw_count": raw_count,
             "normalized_count": normalized_count,
+            "kept_after_experience_filter_count": kept_after_experience_filter_count,
+            "filtered_out_by_experience_count": filtered_out_by_experience_count,
+            "kept_after_recency_filter_count": kept_after_recency_filter_count,
+            "dropped_old_jobs_count": dropped_old_jobs_count,
+            "average_job_age_days": average_job_age_days,
+            "oldest_job_age": oldest_job_age,
             "deduped_count": deduped_count,
             "duplicates_collapsed": duplicates_collapsed,
             "discovered_raw_count": int(upstream_collection_summary.get("discovered_raw_count") or raw_count),
@@ -333,6 +442,8 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "dropped_by_basic_filter_count": int(upstream_collection_summary.get("dropped_by_basic_filter_count") or 0),
             "collection_deduped_count": int(upstream_collection_summary.get("deduped_count") or 0),
         },
+        "experience_filter_applied": experience_filter_applied,
+        "recency_filter_applied": recency_filter_applied,
         "jobs_normalized_artifact": jobs_normalized_artifact,
         "jobs_deduped_artifact": jobs_deduped_artifact,
         # Backwards-compatible field consumed by jobs_rank_v1.
@@ -392,6 +503,14 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "pipeline_id": pipeline_id,
             "raw_count": raw_count,
             "normalized_count": normalized_count,
+            "experience_filter_applied": experience_filter_applied,
+            "filtered_out_by_experience_count": filtered_out_by_experience_count,
+            "kept_after_experience_filter_count": kept_after_experience_filter_count,
+            "recency_filter_applied": recency_filter_applied,
+            "dropped_old_jobs_count": dropped_old_jobs_count,
+            "kept_after_recency_filter_count": kept_after_recency_filter_count,
+            "average_job_age_days": average_job_age_days,
+            "oldest_job_age": oldest_job_age,
             "deduped_count": deduped_count,
             "duplicates_collapsed": duplicates_collapsed,
             "ambiguous_case_count": len(ambiguous_cases),
