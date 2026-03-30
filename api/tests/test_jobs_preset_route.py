@@ -25,6 +25,11 @@ def test_ensure_jobs_digest_template_accepts_expanded_configuration() -> None:
         experience_level="senior",
         enabled_sources=["linkedin", "indeed"],
         result_limit_per_source=333,
+        minimum_raw_jobs_total=180,
+        minimum_unique_jobs_total=120,
+        minimum_jobs_per_source=40,
+        stop_when_minimum_reached=True,
+        collection_time_cap_seconds=150,
         max_queries_per_run=14,
         shortlist_count=5,
         freshness_preference="prefer_recent",
@@ -46,6 +51,11 @@ def test_ensure_jobs_digest_template_accepts_expanded_configuration() -> None:
     assert request["sources"] == ["linkedin", "indeed"]
     assert request["result_limit_per_source"] == 333
     assert request["max_jobs_per_source"] == 333
+    assert request["minimum_raw_jobs_total"] == 180
+    assert request["minimum_unique_jobs_total"] == 120
+    assert request["minimum_jobs_per_source"] == 40
+    assert request["stop_when_minimum_reached"] is True
+    assert request["collection_time_cap_seconds"] == 150
     assert request["max_queries_per_run"] == 14
     assert request["shortlist_max_items"] == 5
     assert request["shortlist_freshness_preference"] == "prefer_recent"
@@ -74,6 +84,9 @@ def test_ensure_jobs_digest_template_maps_legacy_fields_for_compatibility() -> N
     assert request["disabled_sources"] == ["glassdoor"]
     assert request["source_configuration_notes"]
     assert request["minimum_salary"] == 125000.0
+    assert request["minimum_raw_jobs_total"] == 120
+    assert request["minimum_unique_jobs_total"] == 80
+    assert request["minimum_jobs_per_source"] == 25
 
 
 def test_ensure_jobs_digest_template_falls_back_when_sources_invalid() -> None:
@@ -86,3 +99,5 @@ def test_ensure_jobs_digest_template_falls_back_when_sources_invalid() -> None:
     request = payload["request"]
 
     assert request["sources"] == ["linkedin", "indeed"]
+    assert request["minimum_raw_jobs_total"] == 120
+    assert request["minimum_unique_jobs_total"] == 80

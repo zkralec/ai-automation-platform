@@ -10,7 +10,7 @@ from jsonschema import Draft7Validator
 
 from llm.openai_adapter import run_chat_completion
 from models.catalog import get_model_info, get_model_price, tier_model
-from task_handlers.jobs_normalize_helpers import metadata_quality_details
+from task_handlers.jobs_normalize_helpers import metadata_quality_details, resolve_posted_age_days
 from task_handlers.jobs_pipeline_common import (
     build_upstream_ref,
     deterministic_job_signals,
@@ -18,6 +18,7 @@ from task_handlers.jobs_pipeline_common import (
     fetch_upstream_result_content_json,
     fit_tier,
     is_broad_discovery_request,
+    location_match_details,
     matches_filters,
     new_pipeline_id,
     payload_object,
@@ -113,6 +114,16 @@ def _job_age_days(posted_at: Any, *, now_utc: datetime | None = None) -> int | N
     return max(int(delta.total_seconds() // 86400), 0)
 
 
+def _row_posted_age_days(row: dict[str, Any], *, now_utc: datetime | None = None) -> int | None:
+    posted_at_normalized = row.get("posted_at_normalized") or row.get("posted_at")
+    return resolve_posted_age_days(
+        posted_age_days=row.get("posted_age_days"),
+        posted_at=posted_at_normalized,
+        posted_at_raw=row.get("posted_at_raw"),
+        reference_time=now_utc or datetime.now(timezone.utc),
+    )
+
+
 def _prefer_recent_enabled(request: dict[str, Any]) -> bool:
     if bool(request.get("prefer_recent")):
         return True
@@ -126,20 +137,51 @@ def _recency_details(
     request: dict[str, Any],
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
-    age_days = _job_age_days(row.get("posted_at"), now_utc=now_utc)
+    age_days = _row_posted_age_days(row, now_utc=now_utc)
     prefer_recent = _prefer_recent_enabled(request)
+    posted_at_normalized = row.get("posted_at_normalized") or row.get("posted_at")
     if age_days is None:
         return {
             "age_days": None,
+            "posted_age_days": None,
+            "posted_at_normalized": posted_at_normalized,
             "recency_score": 0.0,
-            "missing_posted_at_penalty": 20.0,
+            "missing_posted_at_penalty": 28.0 if prefer_recent else 20.0,
             "old_job_penalty": 0.0,
+            "recency_match_reason": "missing_posted_age",
+            "stale_rejected": False,
+        }
+    if prefer_recent and age_days > 30:
+        return {
+            "age_days": age_days,
+            "posted_age_days": age_days,
+            "posted_at_normalized": posted_at_normalized,
+            "recency_score": 0.0,
+            "missing_posted_at_penalty": 0.0,
+            "old_job_penalty": 48.0,
+            "recency_match_reason": "stale_30_plus_days",
+            "stale_rejected": True,
+        }
+    if prefer_recent and age_days > 14:
+        return {
+            "age_days": age_days,
+            "posted_age_days": age_days,
+            "posted_at_normalized": posted_at_normalized,
+            "recency_score": _bounded_score(max(0.0, 55.0 - (age_days - 14) * 3.0)),
+            "missing_posted_at_penalty": 0.0,
+            "old_job_penalty": min(18.0 + (age_days - 14) * 1.5, 40.0),
+            "recency_match_reason": "older_than_recent_window",
+            "stale_rejected": False,
         }
     return {
         "age_days": age_days,
+        "posted_age_days": age_days,
+        "posted_at_normalized": posted_at_normalized,
         "recency_score": _bounded_score(max(0.0, 100.0 - age_days * 5.0)),
         "missing_posted_at_penalty": 0.0,
-        "old_job_penalty": float(age_days * 2) if prefer_recent and age_days > 14 else 0.0,
+        "old_job_penalty": 0.0,
+        "recency_match_reason": "recent_match" if prefer_recent else "recency_recorded",
+        "stale_rejected": False,
     }
 
 
@@ -170,9 +212,13 @@ def _metadata_quality(row: dict[str, Any]) -> dict[str, Any]:
         "missing_posted_at",
         "missing_location",
         "has_direct_source_url",
+        "metadata_quality_location",
+        "metadata_quality_recency",
     ):
         if isinstance(row.get(key), bool):
             details[key] = bool(row.get(key))
+        elif isinstance(row.get(key), str) and row.get(key).strip():
+            details[key] = row.get(key).strip()
     source_url_kind = row.get("source_url_kind")
     if isinstance(source_url_kind, str) and source_url_kind.strip():
         details["source_url_kind"] = source_url_kind.strip().lower()
@@ -375,6 +421,7 @@ def _fallback_scores(job: dict[str, Any], request: dict[str, Any], profile_conte
     keyword_signal = float(signals.get("keyword_signal") or 0.0)
     salary_signal = float(signals.get("salary_signal") or 0.0)
     work_mode_signal = float(signals.get("work_mode_signal") or 0.0)
+    location_match_score = float(signals.get("location_match_score") or 0.0)
     experience_signal = float(signals.get("experience_signal") or 0.0)
     has_direct_source_url = bool(signals.get("has_direct_source_url"))
     inferred_experience = str(signals.get("inferred_experience_level") or "").strip().lower()
@@ -387,7 +434,7 @@ def _fallback_scores(job: dict[str, Any], request: dict[str, Any], profile_conte
     )
     resume_match_score = _bounded_score(16.0 + score_100 * 0.24 + title_match_score * 0.16 + resume_overlap * 48.0 + metadata_norm * 8.0)
     salary_score = _bounded_score(10.0 + salary_signal * 100.0 + metadata_norm * 10.0 + (6.0 if has_direct_source_url else 0.0))
-    location_score = _bounded_score(14.0 + work_mode_signal * 210.0 + metadata_norm * 8.0)
+    location_score = _bounded_score(location_match_score * 0.82 + work_mode_signal * 45.0 + metadata_norm * 6.0)
     seniority_score = _bounded_score(
         12.0 + experience_signal * 220.0 + (8.0 if broad_discovery and inferred_experience == "entry" else 0.0)
     )
@@ -434,6 +481,8 @@ def _fallback_scores(job: dict[str, Any], request: dict[str, Any], profile_conte
             "metadata_quality_score": _round(metadata_score, 2),
             "has_direct_source_url": has_direct_source_url,
             "age_days": recency_details.get("age_days"),
+            "location_match_score": _round(location_match_score, 2),
+            "location_match_reason": signals.get("location_match_reason"),
         },
     }
 
@@ -887,8 +936,15 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 llm_warnings.append(f"llm_missing_score_for_job:{job_id}")
 
         recency_details = _recency_details(row, request=request, now_utc=now_utc)
+        location_details = location_match_details(row, request)
         recency_score = float(llm_score.get("recency_score") or recency_details.get("recency_score") or 0.0)
-        computed_overall = _weighted_overall({**llm_score, "recency_score": recency_score})
+        location_score_structured = float(location_details.get("score") or 0.0)
+        llm_location_score = _bounded_score(llm_score.get("location_score"))
+        if job_id in llm_scores_by_id:
+            location_score = _bounded_score(llm_location_score * 0.55 + location_score_structured * 0.45)
+        else:
+            location_score = _bounded_score(max(llm_location_score, location_score_structured))
+        computed_overall = _weighted_overall({**llm_score, "location_score": location_score, "recency_score": recency_score})
         overall_raw = float(llm_score.get("overall_score") or computed_overall)
         if overall_raw <= 0:
             overall_raw = computed_overall
@@ -896,6 +952,10 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             overall_raw = _bounded_score(overall_raw * 0.88 + recency_score * 0.12)
         else:
             overall_raw = _bounded_score(max(overall_raw, computed_overall))
+        if float(location_details.get("score") or 0.0) < 25.0:
+            overall_raw = _bounded_score(overall_raw - 16.0)
+        elif float(location_details.get("score") or 0.0) < 50.0:
+            overall_raw = _bounded_score(overall_raw - 8.0)
         overall_raw = _bounded_score(
             overall_raw
             - float(recency_details.get("missing_posted_at_penalty") or 0.0)
@@ -908,12 +968,16 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 "resume_match_score": _bounded_score(llm_score.get("resume_match_score")),
                 "title_match_score": _bounded_score(llm_score.get("title_match_score")),
                 "salary_score": _bounded_score(llm_score.get("salary_score")),
-                "location_score": _bounded_score(llm_score.get("location_score")),
+                "location_score": location_score,
                 "seniority_score": _bounded_score(llm_score.get("seniority_score")),
                 "recency_score": _round(recency_score, 2),
                 "age_days": recency_details.get("age_days"),
+                "posted_age_days": recency_details.get("posted_age_days"),
+                "posted_at_normalized": recency_details.get("posted_at_normalized"),
                 "missing_posted_at_penalty": _round(float(recency_details.get("missing_posted_at_penalty") or 0.0), 2),
                 "old_job_penalty": _round(float(recency_details.get("old_job_penalty") or 0.0), 2),
+                "recency_match_reason": recency_details.get("recency_match_reason"),
+                "stale_rejected": bool(recency_details.get("stale_rejected")),
                 "overall_score": _round(overall_raw, 2),
                 "explanation": _short_summary(llm_score.get("explanation"), 220),
                 "explanation_summary": _short_summary(llm_score.get("explanation_summary") or llm_score.get("explanation"), 140),
@@ -934,7 +998,11 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 "missing_location": bool(quality_details.get("missing_location")),
                 "source_url_kind": quality_details.get("source_url_kind"),
                 "has_direct_source_url": bool(quality_details.get("has_direct_source_url")),
+                "metadata_quality_location": quality_details.get("metadata_quality_location"),
+                "metadata_quality_recency": quality_details.get("metadata_quality_recency"),
                 "metadata_quality_penalty": quality_penalty,
+                "location_match_reason": location_details.get("reason"),
+                "location_match_score": _round(location_score_structured, 2),
             }
         )
         scored_jobs.append(row)

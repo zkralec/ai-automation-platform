@@ -13,6 +13,11 @@ Current supported active collection sources:
 - `linkedin`
 - `indeed`
 
+Current collection control model:
+- minimum breadth targets can be set with `minimum_raw_jobs_total`, `minimum_unique_jobs_total`, and `minimum_jobs_per_source`
+- `result_limit_per_source` and `max_total_jobs` remain safety caps
+- collection observability records whether the minimum was reached and why collection stopped
+
 Legacy disabled sources may still appear in older configs, but they are ignored safely and excluded from active-source summaries.
 
 ## Coverage Added

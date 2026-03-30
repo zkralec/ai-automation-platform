@@ -4,7 +4,11 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from task_handlers.jobs_normalize_helpers import canonical_job_key as build_canonical_job_key, metadata_quality_details
+from task_handlers.jobs_normalize_helpers import (
+    canonical_job_key as build_canonical_job_key,
+    metadata_quality_details,
+    resolve_posted_age_days,
+)
 
 
 def _canonical_text(value: Any) -> str:
@@ -79,14 +83,41 @@ def _history_recency_factor(value: Any, *, now_utc: datetime | None = None) -> f
     return 0.2
 
 
-def _freshness_factor(posted_at: Any, *, now_utc: datetime | None = None) -> float:
-    posted = _parse_datetime(posted_at)
-    if posted is None:
+def _freshness_factor(posted_at: Any, *, posted_age_days: Any = None, posted_at_raw: Any = None, now_utc: datetime | None = None) -> float:
+    age_days = resolve_posted_age_days(
+        posted_age_days=posted_age_days,
+        posted_at=posted_at,
+        posted_at_raw=posted_at_raw,
+        reference_time=now_utc or datetime.now(timezone.utc),
+    )
+    if age_days is None:
         return 0.35
-    now = now_utc or datetime.now(timezone.utc)
-    delta_days = max((now - posted).total_seconds() / 86400.0, 0.0)
     # Fast early decay, then gradual flattening.
-    return max(0.0, min(math.exp(-delta_days / 21.0), 1.0))
+    return max(0.0, min(math.exp(-float(age_days) / 21.0), 1.0))
+
+
+def _structured_match_adjustment(row: dict[str, Any]) -> float:
+    adjustment = 0.0
+    location_reason = str(row.get("location_match_reason") or "").strip().lower()
+    recency_reason = str(row.get("recency_match_reason") or "").strip().lower()
+    if location_reason == "exact_location_match":
+        adjustment += 1.5
+    elif location_reason in {"near_location_match", "remote_match_outside_target_geo", "work_mode_match"}:
+        adjustment += 0.75
+    elif location_reason == "location_unknown":
+        adjustment -= 1.75
+    elif location_reason in {"location_mismatch", "remote_hybrid_mismatch", "work_mode_unknown"}:
+        adjustment -= 2.75
+
+    if bool(row.get("stale_rejected")):
+        adjustment -= 3.0
+    elif recency_reason == "recent_match":
+        adjustment += 0.75
+    elif recency_reason == "missing_posted_age":
+        adjustment -= 1.25
+    elif recency_reason in {"older_than_recent_window", "stale_30_plus_days"}:
+        adjustment -= 2.0
+    return round(max(-5.0, min(adjustment, 3.0)), 4)
 
 
 def _score_100(row: dict[str, Any]) -> float:
@@ -189,7 +220,11 @@ def normalize_scored_jobs(rows: Any) -> list[dict[str, Any]]:
         item["_company_key"] = _canonical_text(company) or "_unknown_company"
         item["_title_key"] = _canonical_text(title)
         item["_source_key"] = source
-        item["_freshness_factor"] = _freshness_factor(raw.get("posted_at"))
+        item["_freshness_factor"] = _freshness_factor(
+            raw.get("posted_at_normalized") or raw.get("posted_at"),
+            posted_age_days=raw.get("posted_age_days"),
+            posted_at_raw=raw.get("posted_at_raw"),
+        )
         quality_details, quality_adjustment = _metadata_quality_adjustment(raw)
         item["metadata_quality_score"] = float(quality_details.get("metadata_quality_score") or 0.0)
         item["missing_company"] = bool(quality_details.get("missing_company"))
@@ -198,6 +233,7 @@ def normalize_scored_jobs(rows: Any) -> list[dict[str, Any]]:
         item["missing_location"] = bool(quality_details.get("missing_location"))
         item["has_direct_source_url"] = bool(quality_details.get("has_direct_source_url"))
         item["_metadata_quality_adjustment"] = quality_adjustment
+        item["_structured_match_adjustment"] = _structured_match_adjustment(raw)
         output.append(item)
     return output
 
@@ -297,6 +333,7 @@ def shortlist_jobs(
             company_penalty = float(company_counts.get(company_key, 0)) * company_repetition_penalty
             freshness_bonus = float(row.get("_freshness_factor") or 0.0) * freshness_max_bonus if freshness_weight_enabled else 0.0
             metadata_quality_adjustment = float(row.get("_metadata_quality_adjustment") or 0.0)
+            structured_match_adjustment = float(row.get("_structured_match_adjustment") or 0.0)
             repeat_penalty = 0.0
             if bool(row.get("previously_shortlisted")):
                 repeat_penalty += jobs_shortlist_repeat_penalty * _history_recency_factor(
@@ -322,6 +359,7 @@ def shortlist_jobs(
                 base
                 + freshness_bonus
                 + metadata_quality_adjustment
+                + structured_match_adjustment
                 - source_penalty
                 - company_penalty
                 - repeat_penalty

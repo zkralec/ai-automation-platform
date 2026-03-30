@@ -51,6 +51,7 @@ def test_source_collectors_extract_useful_metadata_from_messy_html(
             "from_cache": False,
         },
     )
+    monkeypatch.setattr(job_boards_scrape, "fetch_html", lambda url, **_kwargs: fixture_html)
 
     module = importlib.import_module(f"integrations.jobs_collectors.{source}")
     result = module.collect_jobs(
@@ -126,6 +127,49 @@ def test_source_collectors_report_missing_metadata_honestly(monkeypatch) -> None
     assert summary["missing_posted_at"] == 1
     assert summary["missing_source_url"] == 0
     assert summary["missing_location"] == 0
+
+
+def test_linkedin_collector_extracts_top_card_location_and_posted_age_without_confusing_noise(monkeypatch) -> None:
+    fixture_html = _fixture("jobs_linkedin_top_card_metadata.html")
+    monkeypatch.setattr(
+        job_boards_scrape,
+        "fetch_html_response",
+        lambda url, **_kwargs: {
+            "html_text": fixture_html,
+            "final_url": url,
+            "status_code": 200,
+            "from_cache": False,
+        },
+    )
+    monkeypatch.setattr(job_boards_scrape, "fetch_html", lambda url, **_kwargs: fixture_html)
+
+    module = importlib.import_module("integrations.jobs_collectors.linkedin")
+    result = module.collect_jobs(
+        {
+            "query": "applied ai engineer",
+            "location": "United States",
+            "result_limit_per_source": 5,
+            "max_pages_per_source": 1,
+        }
+    )
+
+    assert result["status"] == "success"
+    assert len(result["jobs"]) == 1
+
+    job = result["jobs"][0]
+    assert job["title"] == "Senior Applied AI Engineer"
+    assert job["company"] == "Example AI"
+    assert job["location"] == "Cambridge, MA"
+    assert job["location_normalized"] == "Cambridge, MA"
+    assert job["posted_at"] == "3 days ago"
+    assert job["posted_age_days"] == 3
+    assert "21 applicants" in job["source_metadata"]["linkedin_metadata_tokens"]
+    assert "Promoted" in job["source_metadata"]["linkedin_metadata_tokens"]
+    assert "Easy Apply" in job["source_metadata"]["linkedin_metadata_tokens"]
+    assert job["source_metadata"]["posted_at_text"] == "3 days ago"
+    assert job["metadata_diagnostics"]["missing_company"] is False
+    assert job["metadata_diagnostics"]["missing_location"] is False
+    assert job["metadata_diagnostics"]["missing_posted_at"] is False
 
 
 def test_glassdoor_collector_preserves_salary_text_when_available(monkeypatch) -> None:

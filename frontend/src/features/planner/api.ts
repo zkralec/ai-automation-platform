@@ -89,6 +89,11 @@ export function saveJobsPreset(input: {
   experience_level?: string | null;
   enabled_sources?: string[] | null;
   result_limit_per_source?: number | null;
+  minimum_raw_jobs_total?: number | null;
+  minimum_unique_jobs_total?: number | null;
+  minimum_jobs_per_source?: number | null;
+  stop_when_minimum_reached?: boolean | null;
+  collection_time_cap_seconds?: number | null;
   max_queries_per_run?: number | null;
   shortlist_count?: number | null;
   freshness_preference?: string | null;

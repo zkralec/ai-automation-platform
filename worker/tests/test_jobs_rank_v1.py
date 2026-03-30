@@ -659,10 +659,240 @@ def test_jobs_rank_v1_prefers_recent_jobs_and_penalizes_missing_posted_at(monkey
     assert [row["job_id"] for row in ranked] == ["recent", "older", "missing"]
     assert ranked[0]["recency_score"] > ranked[1]["recency_score"] > ranked[2]["recency_score"]
     assert ranked[0]["age_days"] == 1
+    assert ranked[0]["posted_age_days"] == 1
+    assert ranked[0]["recency_match_reason"] == "recency_recorded"
     assert ranked[1]["age_days"] == 18
+    assert ranked[1]["posted_age_days"] == 18
     assert ranked[2]["age_days"] is None
     assert ranked[2]["missing_posted_at_penalty"] == 20.0
+    assert ranked[2]["recency_match_reason"] == "missing_posted_age"
     assert ranked[0]["overall_score_adjusted"] > ranked[1]["overall_score_adjusted"] > ranked[2]["overall_score_adjusted"]
+
+
+def test_jobs_rank_v1_prefers_exact_location_match_over_remote_mismatch(monkeypatch) -> None:
+    monkeypatch.setenv("USE_LLM", "false")
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.normalize.v1",
+            "normalized_jobs": [
+                {
+                    "normalized_job_id": "exact",
+                    "title": "Applied AI Engineer",
+                    "company": "Acme",
+                    "location": "Cambridge, MA",
+                    "location_normalized": "cambridge ma",
+                    "metadata_quality_location": "structured",
+                    "work_mode": "hybrid",
+                    "source": "linkedin",
+                    "source_url": "https://www.linkedin.com/jobs/view/1",
+                    "posted_at": "2026-03-28T00:00:00Z",
+                    "posted_age_days": 2,
+                    "description_snippet": "Cambridge hybrid role.",
+                    "metadata_quality_score": 96,
+                },
+                {
+                    "normalized_job_id": "mismatch",
+                    "title": "Applied AI Engineer",
+                    "company": "Beta",
+                    "location": "Remote",
+                    "location_normalized": "remote",
+                    "metadata_quality_location": "mode_only",
+                    "work_mode": "remote",
+                    "source": "indeed",
+                    "source_url": "https://www.indeed.com/viewjob?jk=2",
+                    "posted_at": "2026-03-28T00:00:00Z",
+                    "posted_age_days": 2,
+                    "description_snippet": "Remote role.",
+                    "metadata_quality_score": 96,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "resolve_profile_context",
+        lambda request: {
+            "enabled": False,
+            "applied": False,
+            "source": "none",
+            "resume_name": None,
+            "updated_at": None,
+            "resume_char_count": 0,
+            "resume_sent_char_count": 0,
+            "resume_truncated": False,
+            "resume_text": "",
+        },
+    )
+
+    result = jobs_rank_v1.execute(
+        _task(
+            {
+                "pipeline_id": "pipe-rank-location",
+                "upstream": {"task_id": "norm-task", "run_id": "norm-run", "task_type": "jobs_normalize_v1"},
+                "request": {
+                    "titles": ["applied ai engineer"],
+                    "locations": ["Cambridge, MA"],
+                    "work_mode_preference": ["hybrid"],
+                },
+                "rank_policy": {"llm_enabled": False},
+            }
+        ),
+        db=object(),
+    )
+    ranked = result["content_json"]["ranked_jobs"]
+
+    assert [row["job_id"] for row in ranked] == ["exact"]
+    assert ranked[0]["location_match_reason"] == "exact_location_match"
+    assert ranked[0]["location_match_score"] == 100.0
+
+
+def test_jobs_rank_v1_penalizes_remote_hybrid_mismatch_when_remote_is_preferred(monkeypatch) -> None:
+    monkeypatch.setenv("USE_LLM", "false")
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.normalize.v1",
+            "normalized_jobs": [
+                {
+                    "normalized_job_id": "remote-good",
+                    "title": "ML Engineer",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "location_normalized": "remote",
+                    "metadata_quality_location": "mode_only",
+                    "work_mode": "remote",
+                    "source": "linkedin",
+                    "source_url": "https://www.linkedin.com/jobs/view/1",
+                    "posted_at": "2026-03-28T00:00:00Z",
+                    "posted_age_days": 2,
+                    "description_snippet": "Remote role.",
+                },
+                {
+                    "normalized_job_id": "hybrid-mismatch",
+                    "title": "ML Engineer",
+                    "company": "Beta",
+                    "location": "Boston, MA",
+                    "location_normalized": "boston ma",
+                    "metadata_quality_location": "structured",
+                    "work_mode": "hybrid",
+                    "source": "indeed",
+                    "source_url": "https://www.indeed.com/viewjob?jk=2",
+                    "posted_at": "2026-03-28T00:00:00Z",
+                    "posted_age_days": 2,
+                    "description_snippet": "Hybrid role.",
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "resolve_profile_context",
+        lambda request: {
+            "enabled": False,
+            "applied": False,
+            "source": "none",
+            "resume_name": None,
+            "updated_at": None,
+            "resume_char_count": 0,
+            "resume_sent_char_count": 0,
+            "resume_truncated": False,
+            "resume_text": "",
+        },
+    )
+
+    result = jobs_rank_v1.execute(
+        _task(
+            {
+                "pipeline_id": "pipe-rank-remote-pref",
+                "upstream": {"task_id": "norm-task", "run_id": "norm-run", "task_type": "jobs_normalize_v1"},
+                "request": {
+                    "titles": ["ml engineer"],
+                    "work_mode_preference": ["remote"],
+                    "require_work_mode_match": False,
+                },
+                "rank_policy": {"llm_enabled": False},
+            }
+        ),
+        db=object(),
+    )
+    ranked = result["content_json"]["ranked_jobs"]
+
+    assert [row["job_id"] for row in ranked] == ["remote-good", "hybrid-mismatch"]
+    assert ranked[0]["location_match_reason"] == "work_mode_match"
+    assert ranked[1]["location_match_reason"] == "remote_hybrid_mismatch"
+    assert ranked[0]["overall_score_adjusted"] > ranked[1]["overall_score_adjusted"]
+
+
+def test_jobs_rank_v1_marks_month_old_jobs_stale_when_prefer_recent(monkeypatch) -> None:
+    monkeypatch.setenv("USE_LLM", "false")
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.normalize.v1",
+            "normalized_jobs": [
+                {
+                    "normalized_job_id": "recent",
+                    "title": "Software Engineer",
+                    "company": "Acme",
+                    "location": "Remote",
+                    "work_mode": "remote",
+                    "source": "linkedin",
+                    "source_url": "https://www.linkedin.com/jobs/view/1",
+                    "posted_at": "2026-03-28T00:00:00Z",
+                    "posted_age_days": 2,
+                },
+                {
+                    "normalized_job_id": "month-old",
+                    "title": "Software Engineer",
+                    "company": "Beta",
+                    "location": "Remote",
+                    "work_mode": "remote",
+                    "source": "indeed",
+                    "source_url": "https://www.indeed.com/viewjob?jk=2",
+                    "posted_at": "2026-02-20T00:00:00Z",
+                    "posted_age_days": 38,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        jobs_rank_v1,
+        "resolve_profile_context",
+        lambda request: {
+            "enabled": False,
+            "applied": False,
+            "source": "none",
+            "resume_name": None,
+            "updated_at": None,
+            "resume_char_count": 0,
+            "resume_sent_char_count": 0,
+            "resume_truncated": False,
+            "resume_text": "",
+        },
+    )
+
+    result = jobs_rank_v1.execute(
+        _task(
+            {
+                "pipeline_id": "pipe-rank-stale",
+                "upstream": {"task_id": "norm-task", "run_id": "norm-run", "task_type": "jobs_normalize_v1"},
+                "request": {"titles": ["software engineer"], "prefer_recent": True},
+                "rank_policy": {"llm_enabled": False},
+            }
+        ),
+        db=object(),
+    )
+    ranked = result["content_json"]["ranked_jobs"]
+
+    assert [row["job_id"] for row in ranked] == ["recent", "month-old"]
+    assert ranked[0]["recency_match_reason"] == "recent_match"
+    assert ranked[1]["recency_match_reason"] == "stale_30_plus_days"
+    assert ranked[1]["stale_rejected"] is True
+    assert ranked[1]["overall_score_adjusted"] < ranked[0]["overall_score_adjusted"]
 
 
 def test_jobs_rank_v1_strict_mode_raises_when_llm_malformed_all_retries(monkeypatch) -> None:

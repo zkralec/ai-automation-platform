@@ -198,6 +198,42 @@ _BOARD_DESCRIPTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     ),
 }
 
+_LINKEDIN_TOP_CARD_COMPANY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r'job-details-jobs-unified-top-card__company-name[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    re.compile(r'jobs-unified-top-card__company-name[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    re.compile(r'topcard__org-name-link[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+)
+_LINKEDIN_TOP_CARD_CONTAINER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r'job-details-jobs-unified-top-card__primary-description-container[^>]*>(.*?)</div>',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r'job-details-jobs-unified-top-card__tertiary-description-container[^>]*>(.*?)</div>',
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
+_LINKEDIN_LOW_EMPHASIS_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r'tvm__text--low-emphasis[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+    re.compile(r'text-body-small[^>]*>(.*?)</', re.IGNORECASE | re.DOTALL),
+)
+_LINKEDIN_METADATA_SPLIT_RE = re.compile(r"\s*(?:·|•|&middot;|&#183;|&#xB7;)\s*", re.IGNORECASE)
+_POSTED_AMOUNT_UNIT_RE = re.compile(
+    r"\b(?P<amount>\d+|a|an)\s*(?P<unit>minute|min|hour|hr|day|d|week|wk|month|mo)s?\s+ago\b",
+    re.IGNORECASE,
+)
+_POSTED_PLUS_DAYS_RE = re.compile(r"\b(?P<amount>\d+)\+\s*days?\s+ago\b", re.IGNORECASE)
+_POSTED_TODAY_TOKEN_RE = re.compile(r"\b(today|just posted|posted today)\b", re.IGNORECASE)
+_POSTED_YESTERDAY_TOKEN_RE = re.compile(r"\byesterday\b", re.IGNORECASE)
+_LINKEDIN_METADATA_NOISE_RE = re.compile(
+    r"\b(applicant|applicants|applied|promoted|easy apply|actively recruiting|recruiting|response rate|alumni)\b",
+    re.IGNORECASE,
+)
+_LINKEDIN_LOCATION_TOKEN_RE = re.compile(
+    r"\b(remote|hybrid|onsite|on-site|united states|united kingdom|canada|[A-Za-z .'-]+,\s*[A-Z]{2}\b)\b",
+    re.IGNORECASE,
+)
+
 _HANDSHAKE_LOGIN_WALL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\blog in\b", re.IGNORECASE),
     re.compile(r"\bsign in\b", re.IGNORECASE),
@@ -375,6 +411,105 @@ def _extract_pattern_text(patterns: tuple[re.Pattern[str], ...], html_text: str)
         if value:
             return value
     return None
+
+
+def _posted_age_days(text: str) -> int | None:
+    normalized = _compact_text(unescape(text)).lower()
+    normalized = re.sub(r"^\s*reposted\s+", "", normalized)
+    if _POSTED_TODAY_TOKEN_RE.search(normalized):
+        return 0
+    if _POSTED_YESTERDAY_TOKEN_RE.search(normalized):
+        return 1
+    plus_match = _POSTED_PLUS_DAYS_RE.search(normalized)
+    if plus_match:
+        return max(int(plus_match.group("amount")), 0)
+    amount_unit = _POSTED_AMOUNT_UNIT_RE.search(normalized)
+    if not amount_unit:
+        return None
+    raw_amount = amount_unit.group("amount").lower()
+    amount = 1 if raw_amount in {"a", "an"} else max(int(raw_amount), 0)
+    unit = amount_unit.group("unit").lower()
+    if unit.startswith("min") or unit.startswith("h"):
+        return 0
+    if unit.startswith("w"):
+        return amount * 7
+    if unit.startswith("mo"):
+        return amount * 30
+    return amount
+
+
+def _linkedin_metadata_tokens(html_text: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str) -> None:
+        text = _compact_text(unescape(_strip_html(raw)))
+        if not text:
+            return
+        for token in _LINKEDIN_METADATA_SPLIT_RE.split(text):
+            compact = _compact_text(token)
+            if compact and compact not in seen:
+                seen.add(compact)
+                values.append(compact)
+
+    for pattern in _LINKEDIN_TOP_CARD_CONTAINER_PATTERNS:
+        for match in pattern.finditer(html_text):
+            add(match.group(1) or "")
+    for pattern in _LINKEDIN_LOW_EMPHASIS_PATTERNS:
+        for match in pattern.finditer(html_text):
+            add(match.group(1) or "")
+    return values
+
+
+def _looks_like_linkedin_location(token: str) -> bool:
+    if not token or _LINKEDIN_METADATA_NOISE_RE.search(token):
+        return False
+    return bool(_LINKEDIN_LOCATION_TOKEN_RE.search(token))
+
+
+def _looks_like_linkedin_company(token: str, *, raw_title: str) -> bool:
+    normalized = _compact_text(token)
+    if not normalized or len(normalized) < 2:
+        return False
+    if normalized.lower() == _compact_text(raw_title).lower():
+        return False
+    if _LINKEDIN_METADATA_NOISE_RE.search(normalized):
+        return False
+    if _posted_age_days(normalized) is not None:
+        return False
+    if _looks_like_linkedin_location(normalized):
+        return False
+    return any(char.isalpha() for char in normalized)
+
+
+def _extract_linkedin_top_card_metadata(html_text: str, *, raw_title: str) -> dict[str, Any]:
+    company = _extract_pattern_text(_LINKEDIN_TOP_CARD_COMPANY_PATTERNS, html_text)
+    location = None
+    posted_text = None
+    posted_age_days = None
+    tokens = _linkedin_metadata_tokens(html_text)
+
+    for token in tokens:
+        if posted_text is None:
+            age_days = _posted_age_days(token)
+            if age_days is not None:
+                posted_text = token
+                posted_age_days = age_days
+                continue
+        if location is None and _looks_like_linkedin_location(token):
+            location = token
+            continue
+        if company is None and _looks_like_linkedin_company(token, raw_title=raw_title):
+            company = token
+
+    return {
+        "company": company,
+        "location": location,
+        "location_normalized": _compact_text(location) if location else None,
+        "posted_at": posted_text,
+        "posted_age_days": posted_age_days,
+        "metadata_tokens": tokens,
+    }
 
 
 def _extract_posted_at(board_key: str, html_text: str, snippet_text: str) -> str | None:
@@ -1499,9 +1634,23 @@ def _extract_jobs_from_html(board_key: str, *, html_text: str, base_url: str, se
         start, end = match.span()
         snippet_html = html_text[max(0, start - 900): min(len(html_text), end + 2000)]
         snippet = _strip_html(snippet_html)
-        company = _extract_pattern_text(_BOARD_COMPANY_PATTERNS.get(board_key) or (), snippet_html) or _extract_company(snippet)
-        location_text = _extract_pattern_text(_BOARD_LOCATION_PATTERNS.get(board_key) or (), snippet_html) or _extract_location(snippet)
-        posted_at = _extract_posted_at(board_key, snippet_html, snippet)
+        linkedin_top_card = _extract_linkedin_top_card_metadata(snippet_html, raw_title=raw_title) if board_key == "linkedin" else {}
+        company = (
+            _extract_pattern_text(_BOARD_COMPANY_PATTERNS.get(board_key) or (), snippet_html)
+            or str(linkedin_top_card.get("company") or "").strip()
+            or _extract_company(snippet)
+        )
+        location_text = (
+            _extract_pattern_text(_BOARD_LOCATION_PATTERNS.get(board_key) or (), snippet_html)
+            or str(linkedin_top_card.get("location") or "").strip()
+            or _extract_location(snippet)
+        )
+        posted_at = (
+            _extract_posted_at(board_key, snippet_html, snippet)
+            or str(linkedin_top_card.get("posted_at") or "").strip()
+            or None
+        )
+        posted_age_days = linkedin_top_card.get("posted_age_days")
         description_snippet = _extract_description(board_key, snippet_html, snippet)
         salary_min, salary_max = _extract_salary_range(snippet)
         salary_text = _extract_salary_text(snippet)
@@ -1525,6 +1674,8 @@ def _extract_jobs_from_html(board_key: str, *, html_text: str, base_url: str, se
                 "clearance_type": clearance_type,
                 "work_mode": work_mode,
                 "posted_at": posted_at,
+                "posted_age_days": posted_age_days if isinstance(posted_age_days, int) else None,
+                "location_normalized": _compact_text(location_text) if location_text else None,
                 "scraped_at": scraped_at,
                 "description_snippet": description_snippet,
                 "raw": {
@@ -1534,6 +1685,13 @@ def _extract_jobs_from_html(board_key: str, *, html_text: str, base_url: str, se
                     "company_text": company,
                     "location_text": location_text,
                     "posted_at_text": posted_at,
+                    "posted_age_days": posted_age_days if isinstance(posted_age_days, int) else None,
+                    "location_normalized": _compact_text(location_text) if location_text else None,
+                    "linkedin_metadata_tokens": (
+                        list(linkedin_top_card.get("metadata_tokens") or [])
+                        if board_key == "linkedin"
+                        else []
+                    ),
                     "salary_text": salary_text,
                     "description_text": description_snippet,
                 },

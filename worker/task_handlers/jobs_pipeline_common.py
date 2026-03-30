@@ -7,7 +7,11 @@ from sqlalchemy import text
 
 from candidate_profile import get_resume_profile as get_stored_resume_profile
 from task_handlers.errors import NonRetryableTaskError
-from task_handlers.jobs_normalize_helpers import metadata_quality_details
+from task_handlers.jobs_normalize_helpers import (
+    classify_location_quality,
+    metadata_quality_details,
+    normalize_location_for_matching,
+)
 
 ACTIVE_JOB_SOURCES = ("linkedin", "indeed")
 LEGACY_DISABLED_JOB_SOURCES = ("glassdoor", "handshake")
@@ -27,6 +31,7 @@ MAX_MAX_QUERIES_PER_RUN = 20
 DEFAULT_ENABLE_QUERY_EXPANSION = True
 DEFAULT_MAX_TOTAL_JOBS = 2000
 MAX_MAX_TOTAL_JOBS = 5000
+MAX_COLLECTION_TIME_CAP_SECONDS = 3600
 DEFAULT_JOBS_NOTIFICATION_COOLDOWN_DAYS = 3
 MAX_JOBS_NOTIFICATION_COOLDOWN_DAYS = 30
 DEFAULT_JOBS_SHORTLIST_REPEAT_PENALTY = 4.0
@@ -73,6 +78,7 @@ _WORK_MODE_HINTS: dict[str, tuple[str, ...]] = {
     "hybrid": (" hybrid ",),
     "onsite": ("on site", "on-site", " onsite ", "in office", "in-office"),
 }
+_BROAD_LOCATION_KEYS = {"united states", "united states of america", "usa", "us", "u s", "north america"}
 
 
 def utc_iso() -> str:
@@ -124,6 +130,16 @@ def _as_bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> 
         parsed = int(value)
     except (TypeError, ValueError):
         parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _as_optional_bounded_int(value: Any, *, minimum: int, maximum: int) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
     return max(minimum, min(parsed, maximum))
 
 
@@ -251,6 +267,165 @@ def _infer_experience_from_text(*parts: Any) -> str | None:
     return None
 
 
+def _request_location_preferences(request: dict[str, Any]) -> list[str]:
+    raw_locations = [value for value in list(request.get("locations") or []) if isinstance(value, str) and value.strip()]
+    location = _pick_text(request, ("location", "search_location"))
+    if location and location not in raw_locations:
+        raw_locations.append(location)
+    location_keywords = [value for value in list(request.get("location_keywords") or []) if isinstance(value, str) and value.strip()]
+    raw_locations.extend(location_keywords)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in raw_locations:
+        key = normalize_location_for_matching(value)
+        if not key or key in {"unspecified", "remote", "hybrid", "onsite"} or key in _BROAD_LOCATION_KEYS or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+    return normalized
+
+
+def _near_location_match(job_location: str, requested_location: str) -> bool:
+    if not job_location or not requested_location:
+        return False
+    if job_location == requested_location:
+        return True
+    if job_location in requested_location or requested_location in job_location:
+        return True
+    job_tokens = set(job_location.split())
+    request_tokens = set(requested_location.split())
+    if not job_tokens or not request_tokens:
+        return False
+    overlap = len(job_tokens.intersection(request_tokens))
+    return overlap >= max(1, min(len(job_tokens), len(request_tokens)) - 1)
+
+
+def location_match_details(job: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    requested_locations = _request_location_preferences(request)
+    desired_work_modes = {_normalize_work_mode(item) for item in list(request.get("work_modes") or [])}
+    desired_work_modes.discard(None)
+    work_mode = _normalize_work_mode(job.get("work_mode")) or _normalize_work_mode(job.get("remote_type"))
+    raw_location = str(job.get("location") or "").strip() or None
+    location_normalized = str(job.get("location_normalized") or "").strip() or normalize_location_for_matching(
+        raw_location,
+        work_mode,
+    )
+    location_quality = str(
+        job.get("metadata_quality_location")
+        or classify_location_quality(raw_location, location_normalized=location_normalized, remote_type=work_mode)
+    ).strip().lower() or "missing"
+
+    has_location_preference = bool(requested_locations)
+    has_work_mode_preference = bool(desired_work_modes)
+
+    if not has_location_preference and not has_work_mode_preference:
+        return {
+            "has_preference": False,
+            "requested_locations": requested_locations,
+            "desired_work_modes": sorted(desired_work_modes),
+            "work_mode": work_mode,
+            "location_normalized": location_normalized or "unspecified",
+            "location_quality": location_quality,
+            "score": 72.0,
+            "reason": "no_location_preference",
+            "is_match": True,
+        }
+
+    if has_work_mode_preference and work_mode not in desired_work_modes:
+        mismatch_reason = "work_mode_unknown" if work_mode is None else "remote_hybrid_mismatch"
+        return {
+            "has_preference": True,
+            "requested_locations": requested_locations,
+            "desired_work_modes": sorted(desired_work_modes),
+            "work_mode": work_mode,
+            "location_normalized": location_normalized or "unspecified",
+            "location_quality": location_quality,
+            "score": 8.0 if work_mode is not None else 14.0,
+            "reason": mismatch_reason,
+            "is_match": False,
+        }
+
+    if not has_location_preference:
+        return {
+            "has_preference": True,
+            "requested_locations": requested_locations,
+            "desired_work_modes": sorted(desired_work_modes),
+            "work_mode": work_mode,
+            "location_normalized": location_normalized or "unspecified",
+            "location_quality": location_quality,
+            "score": 92.0 if work_mode in desired_work_modes else 24.0,
+            "reason": "work_mode_match" if work_mode in desired_work_modes else "work_mode_unknown",
+            "is_match": work_mode in desired_work_modes,
+        }
+
+    if location_quality in {"missing", "weak"} or not location_normalized or location_normalized == "unspecified":
+        return {
+            "has_preference": True,
+            "requested_locations": requested_locations,
+            "desired_work_modes": sorted(desired_work_modes),
+            "work_mode": work_mode,
+            "location_normalized": location_normalized or "unspecified",
+            "location_quality": location_quality,
+            "score": 6.0,
+            "reason": "location_unknown",
+            "is_match": False,
+        }
+
+    exact_match = any(location_normalized == requested for requested in requested_locations)
+    if exact_match:
+        return {
+            "has_preference": True,
+            "requested_locations": requested_locations,
+            "desired_work_modes": sorted(desired_work_modes),
+            "work_mode": work_mode,
+            "location_normalized": location_normalized,
+            "location_quality": location_quality,
+            "score": 100.0,
+            "reason": "exact_location_match",
+            "is_match": True,
+        }
+
+    near_match = any(_near_location_match(location_normalized, requested) for requested in requested_locations)
+    if near_match:
+        return {
+            "has_preference": True,
+            "requested_locations": requested_locations,
+            "desired_work_modes": sorted(desired_work_modes),
+            "work_mode": work_mode,
+            "location_normalized": location_normalized,
+            "location_quality": location_quality,
+            "score": 84.0,
+            "reason": "near_location_match",
+            "is_match": True,
+        }
+
+    if work_mode == "remote" and "remote" in desired_work_modes:
+        return {
+            "has_preference": True,
+            "requested_locations": requested_locations,
+            "desired_work_modes": sorted(desired_work_modes),
+            "work_mode": work_mode,
+            "location_normalized": location_normalized,
+            "location_quality": location_quality,
+            "score": 76.0,
+            "reason": "remote_match_outside_target_geo",
+            "is_match": True,
+        }
+
+    return {
+        "has_preference": True,
+        "requested_locations": requested_locations,
+        "desired_work_modes": sorted(desired_work_modes),
+        "work_mode": work_mode,
+        "location_normalized": location_normalized,
+        "location_quality": location_quality,
+        "score": 10.0,
+        "reason": "location_mismatch",
+        "is_match": False,
+    }
+
+
 def deterministic_job_signals(job: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
     title = _canonical_text(job.get("title"))
     description = _canonical_text(job.get("description_snippet"))
@@ -271,6 +446,7 @@ def deterministic_job_signals(job: dict[str, Any], request: dict[str, Any]) -> d
 
     work_mode = _normalize_work_mode(job.get("work_mode")) or _infer_work_mode_from_text(job.get("title"), job.get("location"), job.get("description_snippet"))
     experience_level = _normalize_experience_level(job.get("experience_level")) or _infer_experience_from_text(job.get("title"), job.get("description_snippet"))
+    location_details = location_match_details(job, request)
 
     salary_min = _as_float(job.get("salary_min")) or 0.0
     salary_max = _as_float(job.get("salary_max")) or 0.0
@@ -285,7 +461,7 @@ def deterministic_job_signals(job: dict[str, Any], request: dict[str, Any]) -> d
     title_signal = min(title_family_hits * 0.62 + title_exact_hits * 0.28, 1.7)
     keyword_signal = min(keyword_hits * 0.14, 0.42)
     salary_signal = min(salary_anchor / 260000.0, 0.55) if salary_anchor > 0 else 0.0
-    work_mode_signal = 0.22 if work_mode == "remote" else 0.12 if work_mode == "hybrid" else 0.0
+    work_mode_signal = min(float(location_details.get("score") or 0.0) / 100.0 * 0.24, 0.24)
     experience_signal = (
         0.18
         if experience_level in {"entry", "internship"}
@@ -328,6 +504,9 @@ def deterministic_job_signals(job: dict[str, Any], request: dict[str, Any]) -> d
         "has_direct_source_url": has_direct_source_url,
         "inferred_work_mode": work_mode,
         "inferred_experience_level": experience_level,
+        "location_match_score": round(float(location_details.get("score") or 0.0), 2),
+        "location_match_reason": location_details.get("reason"),
+        "location_quality": location_details.get("location_quality"),
         "score": total_score,
     }
 
@@ -478,6 +657,40 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
         maximum=MAX_MAX_QUERIES_PER_RUN,
     )
 
+    minimum_raw_jobs_total = _as_optional_bounded_int(
+        request.get("minimum_raw_jobs_total"),
+        minimum=0,
+        maximum=MAX_MAX_TOTAL_JOBS,
+    )
+    if minimum_raw_jobs_total is None:
+        minimum_raw_jobs_total = 0
+
+    minimum_unique_jobs_total = _as_optional_bounded_int(
+        request.get("minimum_unique_jobs_total"),
+        minimum=0,
+        maximum=MAX_MAX_TOTAL_JOBS,
+    )
+    if minimum_unique_jobs_total is None:
+        minimum_unique_jobs_total = 0
+
+    minimum_jobs_per_source = _as_optional_bounded_int(
+        request.get("minimum_jobs_per_source"),
+        minimum=0,
+        maximum=MAX_RESULT_LIMIT_PER_SOURCE,
+    )
+    if minimum_jobs_per_source is None:
+        minimum_jobs_per_source = 0
+
+    stop_when_minimum_reached = _as_bool(request.get("stop_when_minimum_reached"))
+    if stop_when_minimum_reached is None:
+        stop_when_minimum_reached = True
+
+    collection_time_cap_seconds = _as_optional_bounded_int(
+        request.get("collection_time_cap_seconds"),
+        minimum=1,
+        maximum=MAX_COLLECTION_TIME_CAP_SECONDS,
+    )
+
     enable_query_expansion = _as_bool(request.get("enable_query_expansion"))
     if enable_query_expansion is None:
         enable_query_expansion = True if search_mode == "broad_discovery" else False
@@ -528,18 +741,27 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
             source_configuration_notes.append(
                 "No active job sources remained after filtering inactive or unsupported sources; defaulted to linkedin and indeed."
             )
-    if unsupported_sources:
-        source_configuration_notes.append(
-            "Unsupported job sources were ignored: " + ", ".join(unsupported_sources) + "."
-        )
-
-    max_total_jobs = _as_bounded_int(
+    requested_max_total_jobs = _as_bounded_int(
         request.get("max_total_jobs")
         or min(max_jobs * max(len(sources), 1), DEFAULT_MAX_TOTAL_JOBS),
         default=min(max_jobs * max(len(sources), 1), DEFAULT_MAX_TOTAL_JOBS),
         minimum=1,
         maximum=MAX_MAX_TOTAL_JOBS,
     )
+    minimum_total_floor = max(
+        minimum_raw_jobs_total,
+        minimum_unique_jobs_total,
+        minimum_jobs_per_source * max(len(sources), 1),
+    )
+    max_total_jobs = min(MAX_MAX_TOTAL_JOBS, max(requested_max_total_jobs, minimum_total_floor))
+    if unsupported_sources:
+        source_configuration_notes.append(
+            "Unsupported job sources were ignored: " + ", ".join(unsupported_sources) + "."
+        )
+    if requested_max_total_jobs < minimum_total_floor:
+        source_configuration_notes.append(
+            "max_total_jobs was raised to honor the configured minimum jobs target."
+        )
 
     profile_mode = str(request.get("profile_mode") or "resume_profile").strip().lower()
     if profile_mode not in {"resume_profile", "inline_resume", "none"}:
@@ -653,6 +875,11 @@ def resolve_request(raw_request: dict[str, Any] | None) -> dict[str, Any]:
         "max_pages_per_source": max_pages_per_source,
         "max_queries_per_title_location_pair": max_queries_per_title_location_pair,
         "max_queries_per_run": max_queries_per_run,
+        "minimum_raw_jobs_total": minimum_raw_jobs_total,
+        "minimum_unique_jobs_total": minimum_unique_jobs_total,
+        "minimum_jobs_per_source": minimum_jobs_per_source,
+        "stop_when_minimum_reached": bool(stop_when_minimum_reached),
+        "collection_time_cap_seconds": collection_time_cap_seconds,
         "enable_query_expansion": bool(enable_query_expansion),
         "early_stop_when_no_new_results": bool(early_stop_when_no_new_results),
         "enabled_sources": list(sources),
@@ -879,10 +1106,13 @@ def matches_filters(job: dict[str, Any], request: dict[str, Any]) -> bool:
         if not any(keyword.lower() in haystack for keyword in keywords):
             return False
 
-    location_keywords = list(request.get("location_keywords") or [])
-    if location_keywords:
-        haystack = " ".join((title, location, description)).lower()
-        if not any(keyword.lower() in haystack for keyword in location_keywords):
+    location_details = location_match_details(job, request)
+    require_work_mode_match = bool(request.get("require_work_mode_match"))
+    if location_details.get("has_preference") and not bool(location_details.get("is_match")):
+        reason = str(location_details.get("reason") or "").strip().lower()
+        if reason in {"location_unknown", "location_mismatch"}:
+            return False
+        if reason in {"remote_hybrid_mismatch", "work_mode_unknown"} and require_work_mode_match:
             return False
 
     desired_salary_min = _as_float(request.get("desired_salary_min"))
@@ -948,7 +1178,7 @@ def matches_filters(job: dict[str, Any], request: dict[str, Any]) -> bool:
         if work_mode is None:
             if require_work_mode_match:
                 return False
-        elif work_mode not in desired_work_modes:
+        elif work_mode not in desired_work_modes and require_work_mode_match:
             return False
 
     return True

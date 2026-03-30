@@ -156,14 +156,61 @@ def test_jobs_normalize_v1_applies_safe_enrichment_and_quality_flags(monkeypatch
     assert job["source_url"] == "https://www.indeed.com/viewjob?jk=123"
     assert job["source_url_kind"] == "direct"
     assert job["posted_at"] == "2026-03-18T10:30:00Z"
+    assert job["posted_at_normalized"] == "2026-03-18T10:30:00Z"
     assert job["posted_at_raw"] == "2 days ago"
     assert job["salary_min"] == 150000
     assert job["salary_max"] is None
     assert job["salary_text"] == "$150,000"
+    assert job["metadata_quality_location"] == "structured"
+    assert job["metadata_quality_recency"] == "relative_normalized"
     assert job["missing_company"] is True
     assert job["missing_source_url"] is False
     assert job["missing_posted_at"] is False
     assert job["metadata_quality_score"] < 90
+
+
+def test_jobs_normalize_v1_preserves_posted_age_days_and_location_normalized(monkeypatch) -> None:
+    monkeypatch.setattr(
+        jobs_normalize_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs.collect.v1",
+            "raw_jobs": [
+                {
+                    "source": "linkedin",
+                    "source_url": "https://www.linkedin.com/jobs/view/777000111",
+                    "title": "Senior Applied AI Engineer",
+                    "company": "Example AI",
+                    "location": "Cambridge, MA",
+                    "location_normalized": "Cambridge, MA",
+                    "description_snippet": "Build production ML systems.",
+                    "url": "https://www.linkedin.com/jobs/view/777000111",
+                    "posted_at": "3 days ago",
+                    "posted_age_days": 3,
+                    "scraped_at": "2026-03-30T12:00:00Z",
+                    "source_metadata": {"posted_at_text": "3 days ago"},
+                }
+            ],
+            "warnings": [],
+        },
+    )
+
+    payload = {
+        "pipeline_id": "pipe-linkedin-top-card-normalize",
+        "upstream": {"task_id": "collect-task", "run_id": "collect-run", "task_type": "jobs_collect_v1"},
+        "request": {"query": "applied ai engineer", "location": "United States"},
+    }
+    result = jobs_normalize_v1.execute(_task(payload), db=object())
+
+    job = result["content_json"]["normalized_jobs"][0]
+    assert job["location"] == "Cambridge, MA"
+    assert job["location_normalized"] == "cambridge ma"
+    assert job["posted_at"] == "2026-03-27T12:00:00Z"
+    assert job["posted_at_normalized"] == "2026-03-27T12:00:00Z"
+    assert job["posted_at_raw"] == "3 days ago"
+    assert job["posted_age_days"] == 3
+    assert job["metadata_quality_location"] == "structured"
+    assert job["metadata_quality_recency"] == "relative_normalized"
 
 
 def test_jobs_normalize_v1_reports_ambiguous_duplicate_cases(monkeypatch) -> None:
@@ -301,7 +348,6 @@ def test_jobs_normalize_v1_filters_senior_roles_before_dedupe_for_entry_requests
 
 def test_jobs_normalize_v1_drops_old_and_undated_jobs_before_ranking_when_prefer_recent(monkeypatch) -> None:
     now_utc = datetime.now(timezone.utc).replace(microsecond=0)
-    recent_posted_at = (now_utc - timedelta(days=3)).isoformat().replace("+00:00", "Z")
     stale_posted_at = (now_utc - timedelta(days=28)).isoformat().replace("+00:00", "Z")
 
     monkeypatch.setattr(
@@ -320,7 +366,8 @@ def test_jobs_normalize_v1_drops_old_and_undated_jobs_before_ranking_when_prefer
                     "title": "Software Engineer",
                     "company": "Acme",
                     "location": "Remote",
-                    "posted_at": recent_posted_at,
+                    "posted_at": None,
+                    "posted_age_days": 3,
                     "url": "https://example.test/jobs/1",
                 },
                 {
@@ -329,6 +376,7 @@ def test_jobs_normalize_v1_drops_old_and_undated_jobs_before_ranking_when_prefer
                     "company": "Beta",
                     "location": "Remote",
                     "posted_at": stale_posted_at,
+                    "posted_age_days": 28,
                     "url": "https://example.test/jobs/2",
                 },
                 {

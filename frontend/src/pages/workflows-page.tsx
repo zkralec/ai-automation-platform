@@ -126,6 +126,11 @@ type JobsWatcherFormState = {
   experienceLevel: string;
   enabledSources: Record<JobSourceOption, boolean>;
   resultLimitPerSourceText: string;
+  minimumRawJobsTotalText: string;
+  minimumUniqueJobsTotalText: string;
+  minimumJobsPerSourceText: string;
+  stopWhenMinimumReached: boolean;
+  collectionTimeCapSecondsText: string;
   maxQueriesPerRunText: string;
   shortlistCountText: string;
   freshnessPreference: string;
@@ -144,7 +149,12 @@ const DEFAULT_JOBS_WATCHER_FORM_STATE: JobsWatcherFormState = {
   minimumSalaryText: "",
   experienceLevel: "",
   enabledSources: { linkedin: true, indeed: true },
-  resultLimitPerSourceText: "25",
+  resultLimitPerSourceText: "120",
+  minimumRawJobsTotalText: "120",
+  minimumUniqueJobsTotalText: "80",
+  minimumJobsPerSourceText: "25",
+  stopWhenMinimumReached: true,
+  collectionTimeCapSecondsText: "120",
   maxQueriesPerRunText: "12",
   shortlistCountText: "5",
   freshnessPreference: "off",
@@ -245,6 +255,13 @@ type JobsWorkflowSummary = {
   jobsAfterFiltering: number | null;
   jobsAfterDedupe: number | null;
   shortlistedCount: number | null;
+  minimumTargets: {
+    minimumRawJobsTotalRequested: number | null;
+    minimumUniqueJobsTotalRequested: number | null;
+    minimumJobsPerSourceRequested: number | null;
+    minimumReached: boolean;
+    reasonStopped: string | null;
+  };
   notifyStatus: string | null;
   notifyReason: string | null;
   executiveSummary: string | null;
@@ -398,6 +415,40 @@ function normalizeSearchMode(value: unknown): JobSearchModeOption {
     : "broad_discovery";
 }
 
+function formatStopReason(value: string | null | undefined): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "Unknown";
+  if (normalized === "minimum_reached") return "Minimum reached";
+  if (normalized === "time_cap") return "Time cap";
+  if (normalized === "safety_cap") return "Safety cap";
+  if (normalized === "exhausted") return "Sources exhausted";
+  return normalized.replace(/_/g, " ");
+}
+
+function formatMinimumTargetSummary(summary: JobsWorkflowSummary | null): string {
+  if (!summary) return "Minimum target summary appears after the next jobs run.";
+  const minimumTargets = summary.minimumTargets;
+  const parts: string[] = [];
+  if (minimumTargets.minimumRawJobsTotalRequested != null && minimumTargets.minimumRawJobsTotalRequested > 0) {
+    parts.push(`${minimumTargets.minimumRawJobsTotalRequested} raw`);
+  }
+  if (minimumTargets.minimumUniqueJobsTotalRequested != null && minimumTargets.minimumUniqueJobsTotalRequested > 0) {
+    parts.push(`${minimumTargets.minimumUniqueJobsTotalRequested} unique`);
+  }
+  if (minimumTargets.minimumJobsPerSourceRequested != null && minimumTargets.minimumJobsPerSourceRequested > 0) {
+    parts.push(`${minimumTargets.minimumJobsPerSourceRequested} per source`);
+  }
+  if (parts.length === 0) return "No minimum collection target recorded yet.";
+  return parts.join(" / ");
+}
+
+function formatActualCollectionSummary(summary: JobsWorkflowSummary | null): string {
+  if (!summary) return "-";
+  const raw = summary.rawJobsFound == null ? "-" : String(summary.rawJobsFound);
+  const unique = summary.jobsAfterDedupe == null ? "-" : String(summary.jobsAfterDedupe);
+  return `${raw} raw / ${unique} unique`;
+}
+
 function parseJobsWatcherFormFromPayload(rawPayloadJson: string | null | undefined): JobsWatcherFormState {
   const payload = parsePayloadObject(rawPayloadJson);
   const request = payload.request && typeof payload.request === "object" && !Array.isArray(payload.request)
@@ -467,7 +518,16 @@ function parseJobsWatcherFormFromPayload(rawPayloadJson: string | null | undefin
     : "";
 
   const resultLimitRaw = request.result_limit_per_source ?? request.max_jobs_per_source;
-  const resultLimitPerSourceText = resultLimitRaw == null ? "25" : String(resultLimitRaw);
+  const resultLimitPerSourceText = resultLimitRaw == null ? "120" : String(resultLimitRaw);
+  const minimumRawJobsTotalText =
+    request.minimum_raw_jobs_total == null ? "120" : String(request.minimum_raw_jobs_total);
+  const minimumUniqueJobsTotalText =
+    request.minimum_unique_jobs_total == null ? "80" : String(request.minimum_unique_jobs_total);
+  const minimumJobsPerSourceText =
+    request.minimum_jobs_per_source == null ? "25" : String(request.minimum_jobs_per_source);
+  const stopWhenMinimumReached = asBoolean(request.stop_when_minimum_reached) ?? true;
+  const collectionTimeCapSecondsText =
+    request.collection_time_cap_seconds == null ? "120" : String(request.collection_time_cap_seconds);
   const maxQueriesRaw = request.max_queries_per_run;
   const maxQueriesPerRunText = maxQueriesRaw == null ? "12" : String(maxQueriesRaw);
 
@@ -490,6 +550,11 @@ function parseJobsWatcherFormFromPayload(rawPayloadJson: string | null | undefin
     experienceLevel,
     enabledSources,
     resultLimitPerSourceText,
+    minimumRawJobsTotalText,
+    minimumUniqueJobsTotalText,
+    minimumJobsPerSourceText,
+    stopWhenMinimumReached,
+    collectionTimeCapSecondsText,
     maxQueriesPerRunText,
     shortlistCountText,
     freshnessPreference: normalizeFreshnessPreference(
@@ -510,6 +575,7 @@ function parseJobsWorkflowSummary(watcher: Watcher | null): JobsWorkflowSummary 
   const digestPreview = isRecord(summary.digest_preview) ? summary.digest_preview : {};
   const collectionQuality = isRecord(summary.collection_quality) ? summary.collection_quality : {};
   const operatorSummary = isRecord(collectionQuality.operator_summary) ? collectionQuality.operator_summary : {};
+  const minimumTargets = isRecord(collectionQuality.minimum_targets) ? collectionQuality.minimum_targets : {};
 
   const topJobs = Array.isArray(digestPreview.top_jobs)
     ? digestPreview.top_jobs
@@ -560,6 +626,13 @@ function parseJobsWorkflowSummary(watcher: Watcher | null): JobsWorkflowSummary 
     jobsAfterFiltering: asNumber(counts.jobs_after_filtering),
     jobsAfterDedupe: asNumber(counts.jobs_after_dedupe),
     shortlistedCount: asNumber(counts.shortlisted_count),
+    minimumTargets: {
+      minimumRawJobsTotalRequested: asNumber(minimumTargets.minimum_raw_jobs_total_requested),
+      minimumUniqueJobsTotalRequested: asNumber(minimumTargets.minimum_unique_jobs_total_requested),
+      minimumJobsPerSourceRequested: asNumber(minimumTargets.minimum_jobs_per_source_requested),
+      minimumReached: asBoolean(minimumTargets.minimum_reached) ?? false,
+      reasonStopped: asText(minimumTargets.reason_stopped)
+    },
     notifyStatus: asText(notify.status),
     notifyReason: asText(notify.reason),
     executiveSummary: asText(digestPreview.executive_summary),
@@ -614,6 +687,7 @@ function summarizeNotificationBehavior(
 function deriveLastResultSummary(taskType: string, watcher: Watcher | null): string {
   const outcome = watcher?.last_outcome_summary;
   const run = watcher?.last_run_summary;
+  const jobsSummary = taskType.startsWith("jobs_") ? parseJobsWorkflowSummary(watcher) : null;
 
   if (outcome?.message) {
     return summarizeText(outcome.message, 180);
@@ -631,6 +705,12 @@ function deriveLastResultSummary(taskType: string, watcher: Watcher | null): str
   const normalizedStatus = String(run.task_status || "").toLowerCase();
   if (SUCCESS_TASK_STATUSES.has(normalizedStatus)) {
     if (taskType === "deals_scan_v1") return "Latest scan completed; unicorn summary available in run artifacts.";
+    if (taskType.startsWith("jobs_") && jobsSummary) {
+      return summarizeText(
+        `Target ${formatMinimumTargetSummary(jobsSummary)} · reached ${jobsSummary.minimumTargets.minimumReached ? "yes" : "no"} · actual ${formatActualCollectionSummary(jobsSummary)} · stop reason ${formatStopReason(jobsSummary.minimumTargets.reasonStopped)}.`,
+        180
+      );
+    }
     if (taskType.startsWith("jobs_")) return "Latest jobs pipeline stage completed; check run artifacts for stage outputs.";
     if (taskType === NOTIFY_TASK_TYPE) return "Latest notification flow completed.";
     return "Latest run completed successfully.";
@@ -929,6 +1009,11 @@ export function WorkflowsPage(): JSX.Element {
       enabled_sources?: string[] | null;
       boards?: string[] | null;
       result_limit_per_source?: number | null;
+      minimum_raw_jobs_total?: number | null;
+      minimum_unique_jobs_total?: number | null;
+      minimum_jobs_per_source?: number | null;
+      stop_when_minimum_reached?: boolean | null;
+      collection_time_cap_seconds?: number | null;
       max_queries_per_run?: number | null;
       shortlist_count?: number | null;
       freshness_preference?: string | null;
@@ -961,9 +1046,33 @@ export function WorkflowsPage(): JSX.Element {
     }
 
     const resultLimitRaw = jobsForm.resultLimitPerSourceText.trim();
-    const resultLimitPerSource = Number(resultLimitRaw || "25");
+    const resultLimitPerSource = Number(resultLimitRaw || "120");
     if (!Number.isFinite(resultLimitPerSource) || !Number.isInteger(resultLimitPerSource) || resultLimitPerSource < 1 || resultLimitPerSource > 1000) {
       return { error: "Result limit per source must be an integer between 1 and 1000." };
+    }
+
+    const minimumRawJobsRaw = jobsForm.minimumRawJobsTotalText.trim();
+    const minimumRawJobsTotal = Number(minimumRawJobsRaw || "120");
+    if (!Number.isFinite(minimumRawJobsTotal) || !Number.isInteger(minimumRawJobsTotal) || minimumRawJobsTotal < 0 || minimumRawJobsTotal > 5000) {
+      return { error: "Minimum raw jobs total must be an integer between 0 and 5000." };
+    }
+
+    const minimumUniqueJobsRaw = jobsForm.minimumUniqueJobsTotalText.trim();
+    const minimumUniqueJobsTotal = Number(minimumUniqueJobsRaw || "80");
+    if (!Number.isFinite(minimumUniqueJobsTotal) || !Number.isInteger(minimumUniqueJobsTotal) || minimumUniqueJobsTotal < 0 || minimumUniqueJobsTotal > 5000) {
+      return { error: "Minimum unique jobs total must be an integer between 0 and 5000." };
+    }
+
+    const minimumJobsPerSourceRaw = jobsForm.minimumJobsPerSourceText.trim();
+    const minimumJobsPerSource = Number(minimumJobsPerSourceRaw || "25");
+    if (!Number.isFinite(minimumJobsPerSource) || !Number.isInteger(minimumJobsPerSource) || minimumJobsPerSource < 0 || minimumJobsPerSource > 1000) {
+      return { error: "Minimum jobs per source must be an integer between 0 and 1000." };
+    }
+
+    const collectionTimeCapRaw = jobsForm.collectionTimeCapSecondsText.trim();
+    const collectionTimeCapSeconds = Number(collectionTimeCapRaw || "120");
+    if (!Number.isFinite(collectionTimeCapSeconds) || !Number.isInteger(collectionTimeCapSeconds) || collectionTimeCapSeconds < 1 || collectionTimeCapSeconds > 3600) {
+      return { error: "Collection time cap must be an integer between 1 and 3600 seconds." };
     }
 
     const maxQueriesRaw = jobsForm.maxQueriesPerRunText.trim();
@@ -1012,6 +1121,11 @@ export function WorkflowsPage(): JSX.Element {
       enabled_sources: enabledSources,
       boards: enabledSources,
       result_limit_per_source: Math.trunc(resultLimitPerSource),
+      minimum_raw_jobs_total: Math.trunc(minimumRawJobsTotal),
+      minimum_unique_jobs_total: Math.trunc(minimumUniqueJobsTotal),
+      minimum_jobs_per_source: Math.trunc(minimumJobsPerSource),
+      stop_when_minimum_reached: jobsForm.stopWhenMinimumReached,
+      collection_time_cap_seconds: Math.trunc(collectionTimeCapSeconds),
       max_queries_per_run: Math.trunc(maxQueriesPerRun),
       shortlist_count: Math.trunc(shortlistCount),
       freshness_preference: freshnessPreference,
@@ -1055,7 +1169,12 @@ export function WorkflowsPage(): JSX.Element {
         remote_preference: ["remote", "hybrid"],
         enabled_sources: ["linkedin", "indeed"],
         boards: ["linkedin", "indeed"],
-        result_limit_per_source: 25,
+        result_limit_per_source: 120,
+        minimum_raw_jobs_total: 120,
+        minimum_unique_jobs_total: 80,
+        minimum_jobs_per_source: 25,
+        stop_when_minimum_reached: true,
+        collection_time_cap_seconds: 120,
         max_queries_per_run: 12,
         shortlist_count: 5,
         freshness_preference: "off",
@@ -1524,7 +1643,7 @@ export function WorkflowsPage(): JSX.Element {
                       </div>
                     </div>
 
-                    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
+                      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-6">
                       <div className="rounded-md border border-border/70 bg-background/80 px-2 py-2 text-xs">
                         <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Watcher</div>
                         <div className="mt-1 flex items-center gap-2">
@@ -1567,6 +1686,13 @@ export function WorkflowsPage(): JSX.Element {
                         </div>
                         <div className="text-muted-foreground">
                           deduped {selectedJobsWorkflowSummary?.jobsAfterDedupe ?? "-"} · shortlisted {selectedJobsWorkflowSummary?.shortlistedCount ?? "-"}
+                        </div>
+                      </div>
+                      <div className="rounded-md border border-border/70 bg-background/80 px-2 py-2 text-xs">
+                        <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Target</div>
+                        <div className="mt-1 text-foreground">{formatMinimumTargetSummary(selectedJobsWorkflowSummary)}</div>
+                        <div className="text-muted-foreground">
+                          reached {selectedJobsWorkflowSummary?.minimumTargets.minimumReached ? "yes" : "no"} · {formatStopReason(selectedJobsWorkflowSummary?.minimumTargets.reasonStopped)}
                         </div>
                       </div>
                       <div className="rounded-md border border-border/70 bg-background/80 px-2 py-2 text-xs">
@@ -1670,6 +1796,24 @@ export function WorkflowsPage(): JSX.Element {
                           <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2 text-xs">
                             <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Weak Source</div>
                             <div className="mt-1 text-foreground">{selectedJobsWorkflowSummary?.operatorSummary.whichSourceIsWeak || "No weak-source warning."}</div>
+                          </div>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                          <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2 text-xs">
+                            <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Target Requested</div>
+                            <div className="mt-1 text-foreground">{formatMinimumTargetSummary(selectedJobsWorkflowSummary)}</div>
+                          </div>
+                          <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2 text-xs">
+                            <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Target Reached</div>
+                            <div className="mt-1 text-foreground">{selectedJobsWorkflowSummary?.minimumTargets.minimumReached ? "Yes" : "No"}</div>
+                          </div>
+                          <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2 text-xs">
+                            <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Actual Counts</div>
+                            <div className="mt-1 text-foreground">{formatActualCollectionSummary(selectedJobsWorkflowSummary)}</div>
+                          </div>
+                          <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2 text-xs">
+                            <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Stop Reason</div>
+                            <div className="mt-1 text-foreground">{formatStopReason(selectedJobsWorkflowSummary?.minimumTargets.reasonStopped)}</div>
                           </div>
                         </div>
                         <div className="grid gap-2">
@@ -1826,33 +1970,123 @@ export function WorkflowsPage(): JSX.Element {
                         </div>
 
                         <div className="space-y-2">
-                          <Label htmlFor="jobs-limit-per-source">Result limit per source</Label>
+                          <Label htmlFor="jobs-min-raw-total">Minimum raw jobs</Label>
                           <Input
-                            id="jobs-limit-per-source"
+                            id="jobs-min-raw-total"
                             type="number"
-                            min={1}
-                            max={1000}
-                            value={jobsForm.resultLimitPerSourceText}
+                            min={0}
+                            max={5000}
+                            value={jobsForm.minimumRawJobsTotalText}
                             onChange={(event) => {
-                              setJobsForm((prev) => ({ ...prev, resultLimitPerSourceText: event.target.value }));
+                              setJobsForm((prev) => ({ ...prev, minimumRawJobsTotalText: event.target.value }));
+                              setJobsFormError(null);
+                            }}
+                          />
+                          <div className="text-[11px] text-muted-foreground">
+                            Minimum target = how much the pipeline tries to collect before stopping.
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="jobs-min-unique-total">Minimum unique jobs</Label>
+                          <Input
+                            id="jobs-min-unique-total"
+                            type="number"
+                            min={0}
+                            max={5000}
+                            value={jobsForm.minimumUniqueJobsTotalText}
+                            onChange={(event) => {
+                              setJobsForm((prev) => ({ ...prev, minimumUniqueJobsTotalText: event.target.value }));
                               setJobsFormError(null);
                             }}
                           />
                         </div>
 
                         <div className="space-y-2">
-                          <Label htmlFor="jobs-max-queries">Max queries per run</Label>
+                          <Label htmlFor="jobs-min-per-source">Minimum per source</Label>
                           <Input
-                            id="jobs-max-queries"
+                            id="jobs-min-per-source"
                             type="number"
-                            min={1}
-                            max={20}
-                            value={jobsForm.maxQueriesPerRunText}
+                            min={0}
+                            max={1000}
+                            value={jobsForm.minimumJobsPerSourceText}
                             onChange={(event) => {
-                              setJobsForm((prev) => ({ ...prev, maxQueriesPerRunText: event.target.value }));
+                              setJobsForm((prev) => ({ ...prev, minimumJobsPerSourceText: event.target.value }));
                               setJobsFormError(null);
                             }}
                           />
+                          <div className="text-[11px] text-muted-foreground">Optional floor for each active source.</div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-3 text-xs">
+                        <div className="font-semibold uppercase tracking-[0.06em] text-muted-foreground">Minimum Collection Target</div>
+                        <div className="mt-1 text-muted-foreground">
+                          The pipeline keeps paginating and querying until the target is reached, sources are exhausted, a time cap is hit, or a safety cap stops the run.
+                        </div>
+                        <label className="mt-3 flex items-center gap-2 text-sm text-foreground">
+                          <input
+                            type="checkbox"
+                            checked={jobsForm.stopWhenMinimumReached}
+                            onChange={(event) => {
+                              setJobsForm((prev) => ({ ...prev, stopWhenMinimumReached: event.target.checked }));
+                              setJobsFormError(null);
+                            }}
+                          />
+                          <span>Stop once the minimum target is satisfied.</span>
+                        </label>
+                      </div>
+
+                      <div className="rounded-md border border-border/60 bg-muted/10 px-3 py-3">
+                        <div className="text-sm font-semibold">Safety Brakes</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          Max caps are advanced guardrails to prevent runaway collection. Minimum targets above are the primary recommended controls.
+                        </div>
+                        <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                          <div className="space-y-2">
+                            <Label htmlFor="jobs-limit-per-source">Result limit per source</Label>
+                            <Input
+                              id="jobs-limit-per-source"
+                              type="number"
+                              min={1}
+                              max={1000}
+                              value={jobsForm.resultLimitPerSourceText}
+                              onChange={(event) => {
+                                setJobsForm((prev) => ({ ...prev, resultLimitPerSourceText: event.target.value }));
+                                setJobsFormError(null);
+                              }}
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label htmlFor="jobs-time-cap-seconds">Collection time cap (seconds)</Label>
+                            <Input
+                              id="jobs-time-cap-seconds"
+                              type="number"
+                              min={1}
+                              max={3600}
+                              value={jobsForm.collectionTimeCapSecondsText}
+                              onChange={(event) => {
+                                setJobsForm((prev) => ({ ...prev, collectionTimeCapSecondsText: event.target.value }));
+                                setJobsFormError(null);
+                              }}
+                            />
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label htmlFor="jobs-max-queries">Max queries per run</Label>
+                            <Input
+                              id="jobs-max-queries"
+                              type="number"
+                              min={1}
+                              max={20}
+                              value={jobsForm.maxQueriesPerRunText}
+                              onChange={(event) => {
+                                setJobsForm((prev) => ({ ...prev, maxQueriesPerRunText: event.target.value }));
+                                setJobsFormError(null);
+                              }}
+                            />
+                          </div>
                         </div>
                       </div>
                     </div>

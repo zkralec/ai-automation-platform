@@ -191,6 +191,11 @@ def test_resolve_request_applies_broad_discovery_defaults() -> None:
     assert request["shortlist_fail_soft_enabled"] is True
     assert request["shortlist_fallback_min_items"] == 5
     assert request["jobs_notification_cooldown_days"] == 3
+    assert request["minimum_raw_jobs_total"] == 0
+    assert request["minimum_unique_jobs_total"] == 0
+    assert request["minimum_jobs_per_source"] == 0
+    assert request["stop_when_minimum_reached"] is True
+    assert request["collection_time_cap_seconds"] is None
 
 
 def test_resolve_request_applies_precision_match_defaults() -> None:
@@ -211,6 +216,23 @@ def test_resolve_request_applies_precision_match_defaults() -> None:
     assert request["jobs_notification_cooldown_days"] == 7
     assert request["require_keyword_match"] is True
     assert request["require_work_mode_match"] is True
+
+
+def test_resolve_request_raises_max_total_jobs_to_honor_minimums() -> None:
+    request = resolve_request(
+        {
+            "sources": ["linkedin", "indeed"],
+            "result_limit_per_source": 10,
+            "max_total_jobs": 8,
+            "minimum_unique_jobs_total": 25,
+            "minimum_jobs_per_source": 15,
+        }
+    )
+
+    assert request["minimum_unique_jobs_total"] == 25
+    assert request["minimum_jobs_per_source"] == 15
+    assert request["max_total_jobs"] == 30
+    assert any("raised to honor the configured minimum jobs target" in note for note in request["source_configuration_notes"])
 
 
 def test_jobs_collect_v1_reports_partial_success_when_one_source_fails(monkeypatch) -> None:
@@ -695,6 +717,156 @@ def test_jobs_collect_v1_aggregates_query_observability_and_run_cap(monkeypatch)
     assert observability["by_source"]["indeed"]["queries_executed_count"] == 2
     assert observability["by_source"]["indeed"]["jobs_found_per_source"] == 1
     assert artifact["source_results"]["glassdoor"]["meta"]["reason"] == "source_disabled"
+
+
+def test_jobs_collect_v1_stops_when_minimum_target_is_reached(monkeypatch) -> None:
+    requested_limits: dict[str, int] = {}
+
+    def _collector_for(source: str):
+        class _Collector:
+            SUPPORTED_FIELDS = {"source": source}
+
+            @staticmethod
+            def collect_jobs(request: dict, *, url_override: str | None = None) -> dict:
+                del url_override
+                requested_limits[source] = int(request.get("result_limit_per_source") or 0)
+                jobs = [_single_job(source) | {"url": f"https://example.test/{source}/{idx}", "source_url": f"https://example.test/{source}/{idx}", "title": f"{source} role {idx}"} for idx in range(3)]
+                return {
+                    "status": "success",
+                    "jobs": jobs,
+                    "warnings": [],
+                    "errors": [],
+                    "meta": {
+                        "requested_limit": requested_limits[source],
+                        "returned_count": len(jobs),
+                        "discovered_raw_count": len(jobs),
+                        "kept_after_basic_filter_count": len(jobs),
+                        "collection_stop_reason": "minimum_reached",
+                    },
+                }
+
+        return _Collector
+
+    monkeypatch.setattr(jobs_collect_v1, "_load_collector_module", _collector_for)
+
+    payload = {
+        "pipeline_id": "pipe-minimum-stop",
+        "request": {
+            "collectors_enabled": True,
+            "sources": ["linkedin", "indeed"],
+            "titles": ["Software Engineer"],
+            "result_limit_per_source": 2,
+            "minimum_unique_jobs_total": 3,
+            "stop_when_minimum_reached": True,
+        },
+    }
+    result = jobs_collect_v1.execute(_task(payload), db=None)
+    artifact = result["content_json"]
+
+    assert requested_limits == {"linkedin": 2}
+    assert artifact["collection_summary"]["minimum_reached"] is True
+    assert artifact["collection_summary"]["reason_stopped"] == "minimum_reached"
+    assert artifact["collection_counts"]["minimum_unique_jobs_total_requested"] == 3
+    assert artifact["collection_counts"]["reason_stopped"] == "minimum_reached"
+    assert artifact["collection_observability"]["query_summary"]["minimum_reached"] is True
+    assert artifact["collection_observability"]["query_summary"]["reason_stopped"] == "minimum_reached"
+    assert artifact["source_results"]["indeed"]["status"] == "skipped"
+    assert artifact["source_results"]["indeed"]["meta"]["reason"] == "minimum_reached"
+    assert "Minimum jobs target reached before ranking." in artifact["collection_observability"]["run_preview"]["messages"]
+
+
+def test_jobs_collect_v1_surfaces_minimum_target_shortfall(monkeypatch) -> None:
+    def _collector_for(source: str):
+        class _Collector:
+            SUPPORTED_FIELDS = {"source": source}
+
+            @staticmethod
+            def collect_jobs(request: dict, *, url_override: str | None = None) -> dict:
+                del request, url_override
+                jobs = [_single_job(source)]
+                return {
+                    "status": "success",
+                    "jobs": jobs,
+                    "warnings": [],
+                    "errors": [],
+                    "meta": {
+                        "requested_limit": 5,
+                        "returned_count": 1,
+                        "discovered_raw_count": 1,
+                        "kept_after_basic_filter_count": 1,
+                    },
+                }
+
+        return _Collector
+
+    monkeypatch.setattr(jobs_collect_v1, "_load_collector_module", _collector_for)
+
+    payload = {
+        "pipeline_id": "pipe-minimum-shortfall",
+        "request": {
+            "collectors_enabled": True,
+            "sources": ["linkedin", "indeed"],
+            "titles": ["Software Engineer"],
+            "result_limit_per_source": 5,
+            "minimum_raw_jobs_total": 5,
+            "minimum_unique_jobs_total": 5,
+            "minimum_jobs_per_source": 3,
+        },
+    }
+    result = jobs_collect_v1.execute(_task(payload), db=None)
+    artifact = result["content_json"]
+    debug_payload = result["debug_json"]
+
+    assert artifact["collection_status"] == "partial_success"
+    assert artifact["collection_summary"]["minimum_reached"] is False
+    assert artifact["collection_summary"]["reason_stopped"] == "exhausted"
+    assert "LinkedIn needs 2 more" in (artifact["collection_summary"]["minimum_shortfall_summary"] or "")
+    assert debug_payload["minimum_reached"] is False
+    assert debug_payload["reason_stopped"] == "exhausted"
+    assert "Minimum jobs target shortfall:" in " ".join(artifact["collection_observability"]["run_preview"]["messages"])
+
+
+def test_jobs_collect_v1_stops_for_time_cap(monkeypatch) -> None:
+    monotonic_values = iter([0.0, 0.5, 2.0, 2.0])
+    monkeypatch.setattr(jobs_collect_v1.time, "monotonic", lambda: next(monotonic_values))
+
+    def _collector_for(source: str):
+        class _Collector:
+            SUPPORTED_FIELDS = {"source": source}
+
+            @staticmethod
+            def collect_jobs(request: dict, *, url_override: str | None = None) -> dict:
+                del request, url_override
+                return {
+                    "status": "success",
+                    "jobs": [_single_job(source)],
+                    "warnings": [],
+                    "errors": [],
+                    "meta": {"requested_limit": 5, "returned_count": 1, "discovered_raw_count": 1},
+                }
+
+        return _Collector
+
+    monkeypatch.setattr(jobs_collect_v1, "_load_collector_module", _collector_for)
+
+    payload = {
+        "pipeline_id": "pipe-time-cap",
+        "request": {
+            "collectors_enabled": True,
+            "sources": ["linkedin", "indeed"],
+            "titles": ["Software Engineer"],
+            "result_limit_per_source": 5,
+            "minimum_unique_jobs_total": 10,
+            "collection_time_cap_seconds": 1,
+        },
+    }
+    result = jobs_collect_v1.execute(_task(payload), db=None)
+    artifact = result["content_json"]
+
+    assert artifact["collection_summary"]["reason_stopped"] == "time_cap"
+    assert artifact["collection_summary"]["minimum_reached"] is False
+    assert artifact["source_results"]["indeed"]["status"] == "skipped"
+    assert artifact["source_results"]["indeed"]["meta"]["reason"] == "time_cap_reached"
 
 
 def test_jobs_collect_v1_logs_per_source_execution_and_empty_results(monkeypatch, caplog) -> None:

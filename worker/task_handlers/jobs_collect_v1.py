@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import time
 from typing import Any
 
 from task_handlers.jobs_pipeline_common import (
@@ -62,6 +63,11 @@ MANUAL_SUPPORTED_FIELDS = {
     "result_limit_per_source": True,
     "max_pages_per_source": True,
     "max_jobs_per_source": True,
+    "minimum_raw_jobs_total": True,
+    "minimum_unique_jobs_total": True,
+    "minimum_jobs_per_source": True,
+    "stop_when_minimum_reached": True,
+    "collection_time_cap_seconds": True,
     "max_queries_per_title_location_pair": True,
     "max_queries_per_run": True,
     "enable_query_expansion": True,
@@ -82,6 +88,11 @@ MANUAL_SUPPORTED_FIELDS = {
         "result_limit_per_source": "manual_input",
         "max_pages_per_source": "manual_input",
         "max_jobs_per_source": "manual_input",
+        "minimum_raw_jobs_total": "manual_input",
+        "minimum_unique_jobs_total": "manual_input",
+        "minimum_jobs_per_source": "manual_input",
+        "stop_when_minimum_reached": "manual_input",
+        "collection_time_cap_seconds": "manual_input",
         "max_queries_per_title_location_pair": "manual_input",
         "max_queries_per_run": "manual_input",
         "enable_query_expansion": "manual_input",
@@ -270,6 +281,23 @@ def _meta_count(meta: dict[str, Any], key: str, fallback: int = 0) -> int:
         return fallback
 
 
+def _job_key(job: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(job.get("source") or "").strip().lower(),
+        str(job.get("url") or "").strip(),
+        str(job.get("title") or "").strip().lower(),
+    )
+
+
+def _unique_job_count(jobs: list[dict[str, Any]]) -> int:
+    seen: set[tuple[str, str, str]] = set()
+    for row in jobs:
+        if not isinstance(row, dict):
+            continue
+        seen.add(_job_key(row))
+    return len(seen)
+
+
 def _rate(count: int, total: int) -> float:
     if total <= 0:
         return 0.0
@@ -344,6 +372,7 @@ def _build_collection_observability(
     max_total_jobs: int,
     truncated_by_run_limit_count: int,
     run_preview_messages: list[str],
+    minimum_targets: dict[str, Any],
 ) -> dict[str, Any]:
     by_source: dict[str, dict[str, Any]] = {}
     source_focus = _active_source_focus_snapshots(source_results)
@@ -545,6 +574,13 @@ def _build_collection_observability(
     else:
         weak_source_summary = "LinkedIn + Indeed are both contributing normally."
 
+    minimum_shortfall_summary = str(minimum_targets.get("shortfall_summary") or "").strip()
+    searched_enough_suffix = ""
+    if minimum_shortfall_summary:
+        searched_enough_suffix = f" Minimum target shortfall: {minimum_shortfall_summary}."
+    elif bool(minimum_targets.get("minimum_target_requested")) and bool(minimum_targets.get("minimum_reached")):
+        searched_enough_suffix = " Minimum jobs target reached."
+
     return {
         "waterfall": {
             "raw_jobs_discovered": discovered_raw_count,
@@ -558,18 +594,23 @@ def _build_collection_observability(
             "queries_executed": total_queries_executed,
             "empty_queries_count": total_empty_queries,
             "max_total_jobs": max_total_jobs,
+            "minimum_raw_jobs_total_requested": minimum_targets.get("minimum_raw_jobs_total_requested", 0),
+            "minimum_unique_jobs_total_requested": minimum_targets.get("minimum_unique_jobs_total_requested", 0),
+            "minimum_reached": bool(minimum_targets.get("minimum_reached")),
+            "reason_stopped": minimum_targets.get("reason_stopped"),
             "query_examples": query_examples[:10],
             "query_runs": query_runs,
         },
         "by_source": by_source,
         "active_sources_label": active_sources_label,
         "source_focus": source_focus,
+        "minimum_targets": minimum_targets,
         "run_preview": {
             "messages": run_preview_messages,
         },
         "operator_questions": {
-            "searched_enough": searched_enough,
-            "did_we_search_enough": searched_enough,
+            "searched_enough": searched_enough + searched_enough_suffix,
+            "did_we_search_enough": searched_enough + searched_enough_suffix,
             "which_source_is_weak": weak_source_summary,
             "why_raw_count_collapsed": collapse_reason,
             "why_did_raw_count_collapse": collapse_reason,
@@ -610,6 +651,75 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
     board_url_overrides = request.get("board_url_overrides") if isinstance(request.get("board_url_overrides"), dict) else {}
     collectors_enabled = bool(request.get("collectors_enabled", True))
     truncated_by_run_limit_count = 0
+    minimum_raw_jobs_total = max(0, int(request.get("minimum_raw_jobs_total") or 0))
+    minimum_unique_jobs_total = max(0, int(request.get("minimum_unique_jobs_total") or 0))
+    minimum_jobs_per_source = max(0, int(request.get("minimum_jobs_per_source") or 0))
+    stop_when_minimum_reached = bool(request.get("stop_when_minimum_reached", True))
+    raw_collection_time_cap = request.get("collection_time_cap_seconds")
+    try:
+        collection_time_cap_seconds = max(1, int(raw_collection_time_cap)) if raw_collection_time_cap not in (None, "") else None
+    except (TypeError, ValueError):
+        collection_time_cap_seconds = None
+    collection_started_monotonic = time.monotonic()
+    collection_deadline_monotonic = (
+        collection_started_monotonic + collection_time_cap_seconds
+        if collection_time_cap_seconds is not None
+        else None
+    )
+    minimum_target_requested = any(
+        value > 0 for value in (minimum_raw_jobs_total, minimum_unique_jobs_total, minimum_jobs_per_source)
+    )
+    stopped_by_minimum = False
+    stopped_by_time_cap = False
+    stopped_by_safety_cap = False
+
+    def _current_discovered_raw_total() -> int:
+        total = 0
+        for result in source_results.values():
+            meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+            jobs_count = int(result.get("jobs_count", 0) or 0)
+            total += _meta_count(meta, "discovered_raw_count", jobs_count)
+        return total
+
+    def _minimum_state() -> dict[str, Any]:
+        current_raw_jobs_total = _current_discovered_raw_total()
+        current_unique_jobs_total = _unique_job_count(raw_jobs)
+        per_source_shortfalls: dict[str, int] = {}
+        if minimum_jobs_per_source > 0:
+            for configured_source in [str(item).strip().lower() for item in sources if str(item).strip()]:
+                current_count = int(source_results.get(configured_source, {}).get("jobs_count", 0) or 0)
+                shortfall = max(minimum_jobs_per_source - current_count, 0)
+                if shortfall > 0:
+                    per_source_shortfalls[configured_source] = shortfall
+        raw_jobs_shortfall = max(minimum_raw_jobs_total - current_raw_jobs_total, 0)
+        unique_jobs_shortfall = max(minimum_unique_jobs_total - current_unique_jobs_total, 0)
+        minimum_reached = not minimum_target_requested or (
+            raw_jobs_shortfall <= 0
+            and unique_jobs_shortfall <= 0
+            and not per_source_shortfalls
+        )
+        shortfall_parts: list[str] = []
+        if raw_jobs_shortfall > 0:
+            shortfall_parts.append(f"{raw_jobs_shortfall} raw jobs")
+        if unique_jobs_shortfall > 0:
+            shortfall_parts.append(f"{unique_jobs_shortfall} unique jobs")
+        for source_key, shortfall in per_source_shortfalls.items():
+            shortfall_parts.append(f"{_display_source_name(source_key)} needs {shortfall} more")
+        return {
+            "minimum_target_requested": minimum_target_requested,
+            "minimum_raw_jobs_total_requested": minimum_raw_jobs_total,
+            "minimum_unique_jobs_total_requested": minimum_unique_jobs_total,
+            "minimum_jobs_per_source_requested": minimum_jobs_per_source,
+            "stop_when_minimum_reached": stop_when_minimum_reached,
+            "collection_time_cap_seconds": collection_time_cap_seconds,
+            "current_raw_jobs_total": current_raw_jobs_total,
+            "current_unique_jobs_total": current_unique_jobs_total,
+            "per_source_shortfalls": per_source_shortfalls,
+            "raw_jobs_shortfall": raw_jobs_shortfall,
+            "unique_jobs_shortfall": unique_jobs_shortfall,
+            "minimum_reached": minimum_reached,
+            "shortfall_summary": ", ".join(shortfall_parts),
+        }
 
     for note in source_configuration_notes:
         if note not in warnings:
@@ -633,13 +743,14 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             },
         }
 
-    for source in sources:
+    for source_index, source in enumerate(sources):
         source_key = str(source).strip().lower()
         if not source_key:
             continue
 
-        remaining_total_jobs = max_total_jobs - len(raw_jobs)
-        if remaining_total_jobs <= 0:
+        minimum_state_before_source = _minimum_state()
+        if minimum_target_requested and stop_when_minimum_reached and minimum_state_before_source["minimum_reached"]:
+            stopped_by_minimum = True
             source_results[source_key] = {
                 "source": source_key,
                 "status": "skipped",
@@ -647,13 +758,54 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 "warnings": [],
                 "errors": [],
                 "error": None,
-                "meta": {"reason": "max_total_jobs_reached", "remaining_total_jobs": 0},
+                "meta": {
+                    "reason": "minimum_reached",
+                    "source_status": "skipped",
+                    "collection_stop_reason": "minimum_reached",
+                },
+            }
+            continue
+
+        if collection_deadline_monotonic is not None and time.monotonic() >= collection_deadline_monotonic:
+            stopped_by_time_cap = True
+            source_results[source_key] = {
+                "source": source_key,
+                "status": "skipped",
+                "jobs_count": 0,
+                "warnings": [],
+                "errors": [],
+                "error": None,
+                "meta": {
+                    "reason": "time_cap_reached",
+                    "source_status": "skipped",
+                    "collection_stop_reason": "time_cap",
+                },
+            }
+            continue
+
+        remaining_total_jobs = max_total_jobs - len(raw_jobs)
+        if remaining_total_jobs <= 0:
+            stopped_by_safety_cap = True
+            source_results[source_key] = {
+                "source": source_key,
+                "status": "skipped",
+                "jobs_count": 0,
+                "warnings": [],
+                "errors": [],
+                "error": None,
+                "meta": {
+                    "reason": "max_total_jobs_reached",
+                    "remaining_total_jobs": 0,
+                    "source_status": "skipped",
+                    "collection_stop_reason": "safety_cap",
+                },
             }
             continue
 
         if source_key == "manual":
             manual_jobs = _normalize_manual_jobs(request)
             if len(manual_jobs) > remaining_total_jobs:
+                stopped_by_safety_cap = True
                 truncated_by_run_limit_count += len(manual_jobs) - remaining_total_jobs
                 manual_jobs = manual_jobs[:remaining_total_jobs]
             raw_jobs.extend(manual_jobs)
@@ -680,6 +832,9 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                     "query_examples": [],
                     "search_attempts": [],
                     "truncated_by_run_limit_count": truncated_by_run_limit_count,
+                    "minimum_jobs_per_source_requested": minimum_jobs_per_source,
+                    "stop_when_minimum_reached": stop_when_minimum_reached,
+                    "collection_stop_reason": "safety_cap" if len(manual_jobs) >= remaining_total_jobs and remaining_total_jobs > 0 and stopped_by_safety_cap else "exhausted",
                 },
             }
             supported_fields_by_source[source_key] = dict(MANUAL_SUPPORTED_FIELDS)
@@ -716,10 +871,34 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             logger.info("jobs_collect source=%s status=start", source_key)
             collector = _load_collector_module(source_key)
             source_request = dict(request)
-            per_source_limit = min(int(source_request.get("result_limit_per_source") or remaining_total_jobs), remaining_total_jobs)
+            remaining_sources_count = max(
+                1,
+                len([row for row in sources[source_index:] if str(row).strip()]),
+            )
+            source_minimum_shortfall = int(minimum_state_before_source["per_source_shortfalls"].get(source_key, 0) or 0)
+            unique_share_target = (
+                (int(minimum_state_before_source["unique_jobs_shortfall"]) + remaining_sources_count - 1)
+                // remaining_sources_count
+                if int(minimum_state_before_source["unique_jobs_shortfall"]) > 0
+                else 0
+            )
+            raw_share_target = (
+                (int(minimum_state_before_source["raw_jobs_shortfall"]) + remaining_sources_count - 1)
+                // remaining_sources_count
+                if int(minimum_state_before_source["raw_jobs_shortfall"]) > 0
+                else 0
+            )
+            configured_limit = int(source_request.get("result_limit_per_source") or remaining_total_jobs)
+            per_source_limit = min(
+                max(configured_limit, source_minimum_shortfall, unique_share_target, raw_share_target),
+                remaining_total_jobs,
+            )
+            source_request["minimum_jobs_per_source"] = max(source_minimum_shortfall, unique_share_target)
             source_request["result_limit_per_source"] = per_source_limit
             source_request["max_jobs_per_source"] = per_source_limit
             source_request["max_jobs_per_board"] = per_source_limit
+            if collection_deadline_monotonic is not None:
+                source_request["_collection_deadline_monotonic"] = collection_deadline_monotonic
             collector_result = collector.collect_jobs(
                 source_request,
                 url_override=(str(board_url_overrides.get(source_key) or "").strip() or None),
@@ -735,6 +914,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
 
             if len(collected) > remaining_total_jobs:
                 source_truncated_by_run_limit = len(collected) - remaining_total_jobs
+                stopped_by_safety_cap = True
                 truncated_by_run_limit_count += source_truncated_by_run_limit
                 collected = collected[:remaining_total_jobs]
                 source_warnings.append(
@@ -745,6 +925,16 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 source_truncated_by_run_limit,
             )
             source_meta["jobs_found_per_source"] = _meta_count(source_meta, "jobs_found_per_source", len(collected))
+            source_meta["minimum_jobs_per_source_requested"] = max(
+                _meta_count(source_meta, "minimum_jobs_per_source_requested", 0),
+                int(source_request.get("minimum_jobs_per_source") or 0),
+            )
+            source_meta["stop_when_minimum_reached"] = stop_when_minimum_reached
+            if not str(source_meta.get("collection_stop_reason") or "").strip():
+                if source_truncated_by_run_limit > 0:
+                    source_meta["collection_stop_reason"] = "safety_cap"
+                else:
+                    source_meta["collection_stop_reason"] = "exhausted"
 
             status_raw = str(collector_result.get("status") or "").strip().lower()
             status_raw = _normalize_source_status(
@@ -802,6 +992,9 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
     under_target_sources = [key for key, row in source_results.items() if row.get("status") in DEGRADED_SOURCE_STATUSES]
     failed_sources = [key for key, row in source_results.items() if row.get("status") in FAILED_SOURCE_STATUSES]
     skipped_sources = [key for key, row in source_results.items() if row.get("status") == "skipped"]
+    minimum_state = _minimum_state()
+    if minimum_target_requested and stop_when_minimum_reached and minimum_state["minimum_reached"]:
+        stopped_by_minimum = True
 
     # All enabled sources failing is treated as transient so retries can recover.
     enabled_non_manual_sources = [
@@ -817,7 +1010,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
 
     board_counts = {board: int(source_results.get(board, {}).get("jobs_count", 0)) for board in DEFAULT_JOB_BOARDS}
     collection_status = "success"
-    if failed_sources or under_target_sources:
+    if failed_sources or under_target_sources or (minimum_target_requested and not minimum_state["minimum_reached"]):
         collection_status = "partial_success"
 
     discovered_raw_count = 0
@@ -862,12 +1055,28 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             for key, value in normalized_summary.items():
                 metadata_completeness_summary[key] += value
 
+    reason_stopped = "exhausted"
+    if minimum_target_requested and stop_when_minimum_reached and minimum_state["minimum_reached"]:
+        reason_stopped = "minimum_reached"
+    elif stopped_by_time_cap:
+        reason_stopped = "time_cap"
+    elif stopped_by_safety_cap or len(raw_jobs) >= max_total_jobs:
+        reason_stopped = "safety_cap"
+    minimum_state["reason_stopped"] = reason_stopped
+
     run_preview_messages = _build_run_preview_messages(
         source_results=source_results,
     )
     for note in source_configuration_notes:
         if note not in run_preview_messages:
             run_preview_messages.insert(0, note)
+    if minimum_target_requested:
+        if minimum_state["minimum_reached"]:
+            run_preview_messages.append("Minimum jobs target reached before ranking.")
+        elif minimum_state["shortfall_summary"]:
+            run_preview_messages.append(
+                f"Minimum jobs target shortfall: {minimum_state['shortfall_summary']}"
+            )
 
     collection_observability = _build_collection_observability(
         source_results=source_results,
@@ -882,6 +1091,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         max_total_jobs=max_total_jobs,
         truncated_by_run_limit_count=truncated_by_run_limit_count,
         run_preview_messages=run_preview_messages,
+        minimum_targets=minimum_state,
     )
 
     artifact = {
@@ -907,6 +1117,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "skipped_sources": skipped_sources,
         "collection_counts": {
             "raw_job_count": len(raw_jobs),
+            "unique_job_count": minimum_state["current_unique_jobs_total"],
             "discovered_raw_count": discovered_raw_count,
             "kept_after_basic_filter_count": kept_after_basic_filter_count,
             "dropped_by_basic_filter_count": dropped_by_basic_filter_count,
@@ -914,6 +1125,11 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "queries_executed_count": queries_executed_count,
             "empty_queries_count": empty_queries_count,
             "truncated_by_run_limit_count": truncated_by_run_limit_count,
+            "minimum_raw_jobs_total_requested": minimum_state["minimum_raw_jobs_total_requested"],
+            "minimum_unique_jobs_total_requested": minimum_state["minimum_unique_jobs_total_requested"],
+            "minimum_jobs_per_source_requested": minimum_state["minimum_jobs_per_source_requested"],
+            "minimum_reached": minimum_state["minimum_reached"],
+            "reason_stopped": reason_stopped,
         },
         "source_metadata_quality": source_metadata_quality,
         "metadata_completeness_summary": metadata_completeness_summary,
@@ -941,6 +1157,13 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
             "query_examples": query_examples[:10],
             "max_total_jobs": max_total_jobs,
             "truncated_by_run_limit_count": truncated_by_run_limit_count,
+            "minimum_raw_jobs_total_requested": minimum_state["minimum_raw_jobs_total_requested"],
+            "minimum_unique_jobs_total_requested": minimum_state["minimum_unique_jobs_total_requested"],
+            "minimum_jobs_per_source_requested": minimum_state["minimum_jobs_per_source_requested"],
+            "stop_when_minimum_reached": minimum_state["stop_when_minimum_reached"],
+            "minimum_reached": minimum_state["minimum_reached"],
+            "reason_stopped": reason_stopped,
+            "minimum_shortfall_summary": minimum_state["shortfall_summary"] or None,
             "missing_company": metadata_completeness_summary["missing_company"],
             "missing_posted_at": metadata_completeness_summary["missing_posted_at"],
             "missing_source_url": metadata_completeness_summary["missing_source_url"],
@@ -962,6 +1185,12 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
         "sources_failed": failed_sources,
         "sources_skipped": skipped_sources,
         "per_source_job_counts": {key: int(row.get("jobs_count", 0) or 0) for key, row in source_results.items()},
+        "minimum_raw_jobs_total_requested": minimum_state["minimum_raw_jobs_total_requested"],
+        "minimum_unique_jobs_total_requested": minimum_state["minimum_unique_jobs_total_requested"],
+        "minimum_jobs_per_source_requested": minimum_state["minimum_jobs_per_source_requested"],
+        "minimum_reached": minimum_state["minimum_reached"],
+        "minimum_shortfall_summary": minimum_state["shortfall_summary"] or None,
+        "reason_stopped": reason_stopped,
         "per_source_status": {
             key: {
                 "source": key,
@@ -977,6 +1206,12 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
                 "source_error_type": str(
                     ((row.get("meta") if isinstance(row.get("meta"), dict) else {}) or {}).get("source_error_type")
                     or ((row.get("meta") if isinstance(row.get("meta"), dict) else {}) or {}).get("error_type")
+                    or ""
+                ).strip()
+                or None,
+                "collection_stop_reason": str(
+                    ((row.get("meta") if isinstance(row.get("meta"), dict) else {}) or {}).get("collection_stop_reason")
+                    or ((row.get("meta") if isinstance(row.get("meta"), dict) else {}) or {}).get("reason")
                     or ""
                 ).strip()
                 or None,

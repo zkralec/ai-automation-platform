@@ -222,16 +222,24 @@ def test_jobs_watcher_includes_compact_workflow_summary() -> None:
                             "planner_template_id": watcher_id,
                             "request": {"enabled_sources": ["linkedin", "indeed"], "search_mode": "broad_discovery"},
                         },
-                    {
-                        "collection_counts": {
-                            "discovered_raw_count": 420,
-                            "kept_after_basic_filter_count": 310,
-                            "queries_executed_count": 12,
-                        },
-                        "collection_observability": {
-                            "operator_questions": {
-                                "searched_enough": "LinkedIn + Indeed active. LinkedIn contributed 220 raw jobs; Indeed contributed 200 raw jobs. 12 queries executed.",
-                                "which_source_is_weak": "Lowest raw contribution came from Indeed.",
+                        {
+                            "collection_counts": {
+                                "discovered_raw_count": 420,
+                                "kept_after_basic_filter_count": 310,
+                                "queries_executed_count": 12,
+                                "minimum_reached": True,
+                            },
+                            "collection_observability": {
+                                "minimum_targets": {
+                                    "minimum_raw_jobs_total_requested": 120,
+                                    "minimum_unique_jobs_total_requested": 80,
+                                    "minimum_jobs_per_source_requested": 25,
+                                    "minimum_reached": True,
+                                    "reason_stopped": "minimum_reached",
+                                },
+                                "operator_questions": {
+                                    "searched_enough": "LinkedIn + Indeed active. LinkedIn contributed 220 raw jobs; Indeed contributed 200 raw jobs. 12 queries executed.",
+                                    "which_source_is_weak": "Lowest raw contribution came from Indeed.",
                                 "why_did_raw_count_collapse": "Basic filtering removed 110 jobs.",
                                 "are_we_missing_metadata": "Weakest metadata source: Indeed.",
                             },
@@ -402,10 +410,12 @@ def test_jobs_watcher_includes_compact_workflow_summary() -> None:
         assert workflow_summary["counts"]["jobs_after_filtering"] == 310
         assert workflow_summary["counts"]["jobs_after_dedupe"] == 180
         assert workflow_summary["counts"]["shortlisted_count"] == 6
+        assert workflow_summary["counts"]["minimum_reached"] is True
         assert workflow_summary["query_count_used"] == 12
         assert workflow_summary["notify"]["status"] == "sent"
         assert workflow_summary["digest_preview"]["headline"] == "Solid senior backend batch with good source diversity."
         assert workflow_summary["digest_preview"]["top_jobs"][0]["source_url"] == "https://example.com/jobs/123"
+        assert workflow_summary["collection_quality"]["minimum_targets"]["reason_stopped"] == "minimum_reached"
         assert workflow_summary["collection_quality"]["by_source"][0]["source_label"] == "LinkedIn"
         assert workflow_summary["collection_quality"]["by_source"][1]["under_target"] is True
         assert workflow_summary["collection_quality"]["by_source"][1]["missing_posted_at_rate"] == 18.0

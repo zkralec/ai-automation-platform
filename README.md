@@ -2,6 +2,8 @@
 
 Mission Control is a local-first AI task orchestration system built to run continuously on a mini-PC or server.
 
+Always-on mini-PC deployment details live in [docs/MINI_PC_ALWAYS_ON_DEPLOYMENT.md](docs/MINI_PC_ALWAYS_ON_DEPLOYMENT.md).
+
 It includes:
 - a FastAPI API
 - a durable RQ worker
@@ -26,12 +28,12 @@ Durable services:
 - `scheduler`
 - `postgres`
 - `redis`
-- `adminer` (optional database UI)
+- `adminer` (optional database UI, disabled by default unless you use the `ops` Compose profile)
 
 Recommended run mode:
 
 ```bash
-docker compose up -d --build
+scripts/ops/mission-control.sh start
 ```
 
 That starts everything in detached mode with `restart: unless-stopped`.
@@ -84,24 +86,21 @@ Important notes:
 ### 3. Start the stack
 
 ```bash
-docker compose up -d --build
-docker compose ps
+scripts/ops/mission-control.sh start
+scripts/ops/mission-control.sh ps
 ```
 
 ### 4. Confirm the core services are healthy
 
 ```bash
-docker compose ps
-docker compose logs --no-color --tail=60 api
-docker compose logs --no-color --tail=60 worker
-docker compose logs --no-color --tail=60 scheduler
+scripts/ops/mission-control.sh health
 ```
 
 ## Open the UI
 
 Mission Control now has two ways to use the UI:
 
-- recommended: the built React app served by the API at `/app/`
+- recommended for the always-on deployment: the built React app served by the API at `/app/`
 - optional for frontend development: the Vite dev server on port `5173`
 
 ### Recommended: built UI served by the API
@@ -128,6 +127,8 @@ Then open on your laptop:
 - Adminer: `http://localhost:8080/`
 
 This is the simplest and most reliable way to use Mission Control from a laptop.
+
+If you want browser access over Tailscale without keeping an SSH session open, configure Tailscale Serve or another tailnet-only forwarding layer on the mini-PC that proxies to `127.0.0.1:8000`.
 
 ### If you use VS Code Remote SSH and want the direct numeric URL
 
@@ -226,29 +227,33 @@ The Jobs watcher is designed to be operated from the UI without hand-editing JSO
 ### Start or rebuild everything
 
 ```bash
-docker compose up -d --build
+scripts/ops/mission-control.sh start
 ```
 
 ### Restart one service
 
 ```bash
-docker compose restart api
-docker compose restart worker
-docker compose restart scheduler
+scripts/ops/mission-control.sh restart
 ```
 
 ### Follow logs
 
 ```bash
-docker compose logs -f api
-docker compose logs -f worker
-docker compose logs -f scheduler
+scripts/ops/mission-control.sh logs api
+scripts/ops/mission-control.sh logs worker
+scripts/ops/mission-control.sh logs scheduler
 ```
 
 ### Stop everything
 
 ```bash
-docker compose down
+scripts/ops/mission-control.sh stop
+```
+
+### Verify runtime health
+
+```bash
+scripts/ops/mission-control.sh health
 ```
 
 ## API Quickstart
@@ -267,7 +272,7 @@ curl -s -X POST http://localhost:8000/tasks \
   -H 'Content-Type: application/json' \
   -d '{
     "task_type": "jobs_collect_v1",
-    "payload_json": "{\"request\":{\"collectors_enabled\":true,\"profile_mode\":\"resume_profile\",\"sources\":[\"linkedin\",\"indeed\"],\"titles\":[\"Machine Learning Engineer\"],\"desired_title_keywords\":[\"machine learning engineer\",\"ai engineer\"],\"keywords\":[\"python\",\"llm\"],\"excluded_keywords\":[\"staff\"],\"locations\":[\"Remote\",\"New York, NY\"],\"work_modes\":[\"remote\",\"hybrid\"],\"desired_salary_min\":160000,\"experience_levels\":[\"entry\",\"mid\",\"senior\"],\"result_limit_per_source\":250,\"max_queries_per_run\":12,\"shortlist_count\":5,\"jobs_notification_cooldown_days\":3,\"resurface_seen_jobs\":true}}",
+    "payload_json": "{\"request\":{\"collectors_enabled\":true,\"profile_mode\":\"resume_profile\",\"sources\":[\"linkedin\",\"indeed\"],\"titles\":[\"Machine Learning Engineer\"],\"desired_title_keywords\":[\"machine learning engineer\",\"ai engineer\"],\"keywords\":[\"python\",\"llm\"],\"excluded_keywords\":[\"staff\"],\"locations\":[\"Remote\",\"New York, NY\"],\"work_modes\":[\"remote\",\"hybrid\"],\"desired_salary_min\":160000,\"experience_levels\":[\"entry\",\"mid\",\"senior\"],\"result_limit_per_source\":120,\"minimum_raw_jobs_total\":120,\"minimum_unique_jobs_total\":80,\"minimum_jobs_per_source\":25,\"stop_when_minimum_reached\":true,\"collection_time_cap_seconds\":120,\"max_queries_per_run\":12,\"shortlist_count\":5,\"jobs_notification_cooldown_days\":3,\"resurface_seen_jobs\":true}}",
     "model": null
   }' | jq
 ```
@@ -315,7 +320,7 @@ Docker Compose services:
 - `scheduler`: recurring and retry-due task creation
 - `postgres`: primary relational store
 - `redis`: queue backend
-- `adminer`: optional database browser
+- `adminer`: optional database browser when you start with `COMPOSE_PROFILES=ops`
 
 High-level flow:
 1. A client or watcher creates a task with `POST /tasks`.

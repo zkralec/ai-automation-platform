@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import re
 from typing import Any
 
-from task_handlers.jobs_normalize_helpers import dedupe_normalized_jobs, normalize_jobs
+from task_handlers.jobs_normalize_helpers import dedupe_normalized_jobs, normalize_jobs, resolve_posted_age_days
 from task_handlers.jobs_pipeline_common import (
     build_upstream_ref,
     expect_artifact_type,
@@ -282,6 +282,15 @@ def _job_age_days(posted_at: Any, *, now_utc: datetime | None = None) -> int | N
     return max(int(delta.total_seconds() // 86400), 0)
 
 
+def _row_age_days(row: dict[str, Any], *, now_utc: datetime | None = None) -> int | None:
+    return resolve_posted_age_days(
+        posted_age_days=row.get("posted_age_days"),
+        posted_at=row.get("posted_at_normalized") or row.get("posted_at"),
+        posted_at_raw=row.get("posted_at_raw"),
+        reference_time=now_utc or datetime.now(timezone.utc),
+    )
+
+
 def _prefer_recent_enabled(request: dict[str, Any]) -> bool:
     if bool(request.get("prefer_recent")):
         return True
@@ -289,8 +298,8 @@ def _prefer_recent_enabled(request: dict[str, Any]) -> bool:
     return freshness in {"prefer_recent", "strong_prefer_recent"}
 
 
-def is_recent(posted_at: Any, max_age_days: int, *, now_utc: datetime | None = None) -> bool:
-    age_days = _job_age_days(posted_at, now_utc=now_utc)
+def is_recent(row: dict[str, Any], max_age_days: int, *, now_utc: datetime | None = None) -> bool:
+    age_days = _row_age_days(row, now_utc=now_utc)
     if age_days is None:
         return False
     return age_days <= max_age_days
@@ -329,7 +338,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
     if recency_filter_applied:
         recent_normalized_jobs: list[dict[str, Any]] = []
         for row in normalized_jobs:
-            if is_recent(row.get("posted_at"), 14, now_utc=now_utc):
+            if is_recent(row, 14, now_utc=now_utc):
                 recent_normalized_jobs.append(row)
             else:
                 dropped_old_jobs_count += 1
@@ -338,7 +347,7 @@ def execute(task: Any, db: Any) -> dict[str, Any]:
     remaining_age_days = [
         age_days
         for row in normalized_jobs
-        if (age_days := _job_age_days(row.get("posted_at"), now_utc=now_utc)) is not None
+        if (age_days := _row_age_days(row, now_utc=now_utc)) is not None
     ]
     average_job_age_days = round(sum(remaining_age_days) / len(remaining_age_days), 1) if remaining_age_days else 0.0
     oldest_job_age = max(remaining_age_days) if remaining_age_days else 0

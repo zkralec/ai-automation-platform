@@ -2,8 +2,8 @@ FROM node:20-alpine AS frontend-builder
 
 WORKDIR /frontend
 
-COPY frontend/package.json ./
-RUN npm install --no-fund --no-audit
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-fund --no-audit
 
 COPY frontend/ ./
 RUN npm run build
@@ -12,6 +12,7 @@ RUN npm run build
 FROM python:3.12-slim
 
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1
 
 RUN pip install --no-cache-dir -U pip
 

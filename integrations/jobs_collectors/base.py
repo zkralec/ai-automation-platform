@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from integrations.job_boards_scrape import collect_jobs_from_board
@@ -317,6 +318,8 @@ def _normalize_job(board: str, row: dict[str, Any], *, url_override: str | None)
         "experience_level": row.get("experience_level"),
         "work_mode": row.get("work_mode"),
         "posted_at": row.get("posted_at"),
+        "posted_age_days": row.get("posted_age_days"),
+        "location_normalized": row.get("location_normalized"),
         "scraped_at": row.get("scraped_at"),
         "description_snippet": row.get("description_snippet"),
         "source_metadata": raw,
@@ -427,6 +430,11 @@ def supported_fields(board: str | None = None) -> dict[str, Any]:
         "result_limit_per_source": True,
         "max_pages_per_source": True,
         "max_jobs_per_source": True,
+        "minimum_raw_jobs_total": True,
+        "minimum_unique_jobs_total": True,
+        "minimum_jobs_per_source": True,
+        "stop_when_minimum_reached": True,
+        "collection_time_cap_seconds": True,
         "max_queries_per_title_location_pair": True,
         "max_queries_per_run": True,
         "enable_query_expansion": True,
@@ -447,6 +455,11 @@ def supported_fields(board: str | None = None) -> dict[str, Any]:
             "result_limit_per_source": "collector_limit",
             "max_pages_per_source": "pagination_limit",
             "max_jobs_per_source": "collector_limit",
+            "minimum_raw_jobs_total": "pipeline_collection_floor",
+            "minimum_unique_jobs_total": "pipeline_collection_floor",
+            "minimum_jobs_per_source": "source_collection_floor",
+            "stop_when_minimum_reached": "minimum_target_stop_condition",
+            "collection_time_cap_seconds": "collection_time_cap",
             "max_queries_per_title_location_pair": "query_expansion_limit",
             "max_queries_per_run": "run_level_query_cap",
             "enable_query_expansion": "query_expansion_toggle",
@@ -472,6 +485,19 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
     max_queries_per_run = _normalize_max_queries_per_run(request)
     enable_query_expansion = _normalize_enable_query_expansion(request)
     early_stop_when_no_new_results = _normalize_early_stop(request)
+    try:
+        minimum_jobs_per_source = int(request.get("minimum_jobs_per_source") or request.get("collector_minimum_jobs_target") or 0)
+    except (TypeError, ValueError):
+        minimum_jobs_per_source = 0
+    minimum_jobs_per_source = max(0, min(minimum_jobs_per_source, MAX_RESULT_LIMIT_PER_SOURCE))
+    stop_when_minimum_reached = _as_bool(request.get("stop_when_minimum_reached"))
+    if stop_when_minimum_reached is None:
+        stop_when_minimum_reached = True
+    collection_deadline_monotonic = request.get("_collection_deadline_monotonic")
+    if isinstance(collection_deadline_monotonic, (int, float)):
+        deadline_monotonic = float(collection_deadline_monotonic)
+    else:
+        deadline_monotonic = None
     work_mode_preferences = _normalize_work_mode_preferences(request)
     experience_preferences = sorted(_normalize_experience_preferences(request))
 
@@ -506,8 +532,13 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
     empty_queries_count = 0
     consecutive_empty_queries = 0
     seen_candidate_keys: set[tuple[str, str, str]] = set()
+    seen_kept_candidate_keys: set[tuple[str, str, str]] = set()
+    collection_stop_reason = "exhausted"
 
     for query_index, query_spec in enumerate(query_plan, start=1):
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            collection_stop_reason = "time_cap"
+            break
         query_variant = str(query_spec.get("query") or "").strip()
         location = str(query_spec.get("location") or "").strip() or (locations[0] if locations else DEFAULT_LOCATION)
         title_seed = str(query_spec.get("title_seed") or "").strip() or (title_seeds[0] if title_seeds else query_variant)
@@ -565,6 +596,8 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
             if key not in seen_candidate_keys:
                 seen_candidate_keys.add(key)
                 new_unique_candidates += 1
+            if _job_matches_basic_filters(normalized, request):
+                seen_kept_candidate_keys.add(key)
 
         if new_unique_candidates <= 0:
             empty_queries_count += 1
@@ -626,6 +659,9 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
             }
         )
 
+        if minimum_jobs_per_source > 0 and stop_when_minimum_reached and len(seen_kept_candidate_keys) >= minimum_jobs_per_source:
+            collection_stop_reason = "minimum_reached"
+            break
         if consecutive_empty_queries >= DEFAULT_CONSECUTIVE_EMPTY_QUERIES_STOP:
             break
 
@@ -655,6 +691,8 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
     if len(collected) > max_jobs:
         truncated_by_source_limit_count = len(collected) - max_jobs
         collected = collected[:max_jobs]
+        if collection_stop_reason != "minimum_reached":
+            collection_stop_reason = "safety_cap"
 
     search_attempts_by_query = {
         f"{row.get('query_index')}:{row.get('query')}": row for row in search_attempts
@@ -729,6 +767,10 @@ def collect_board_jobs(board: str, request: dict[str, Any], *, url_override: str
             "consecutive_empty_queries_stop": DEFAULT_CONSECUTIVE_EMPTY_QUERIES_STOP,
             "failed_locations": failed_locations,
             "requested_limit": max_jobs,
+            "minimum_jobs_per_source_requested": minimum_jobs_per_source,
+            "stop_when_minimum_reached": bool(stop_when_minimum_reached),
+            "collection_time_cap_seconds": request.get("collection_time_cap_seconds"),
+            "collection_stop_reason": collection_stop_reason,
             "max_pages_per_source": max_pages,
             "early_stop_when_no_new_results": early_stop_when_no_new_results,
             "discovered_raw_count": discovered_raw_count,

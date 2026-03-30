@@ -244,6 +244,59 @@ def test_jobs_shortlist_v1_prefers_more_complete_metadata_when_scores_are_close(
     assert top["metadata_quality_score"] > 90
 
 
+def test_jobs_shortlist_v1_uses_structured_location_and_recency_adjustments(monkeypatch) -> None:
+    monkeypatch.setattr(
+        jobs_shortlist_v1,
+        "fetch_upstream_result_content_json",
+        lambda db, upstream: {
+            "artifact_type": "jobs_scored.v1",
+            "jobs_scored": [
+                {
+                    "job_id": "exact-recent",
+                    "title": "Applied AI Engineer",
+                    "company": "Acme",
+                    "source": "linkedin",
+                    "overall_score": 86,
+                    "score": 1.72,
+                    "location_match_reason": "exact_location_match",
+                    "recency_match_reason": "recent_match",
+                    "posted_at": "2026-03-28T00:00:00Z",
+                    "posted_age_days": 2,
+                },
+                {
+                    "job_id": "mismatch-stale",
+                    "title": "Applied AI Engineer",
+                    "company": "Beta",
+                    "source": "indeed",
+                    "overall_score": 88,
+                    "score": 1.76,
+                    "location_match_reason": "location_mismatch",
+                    "recency_match_reason": "stale_30_plus_days",
+                    "stale_rejected": True,
+                    "posted_at": "2026-02-20T00:00:00Z",
+                    "posted_age_days": 38,
+                },
+            ],
+        },
+    )
+
+    payload = {
+        "pipeline_id": "pipe-short-structured",
+        "upstream": {"task_id": "rank-task", "run_id": "rank-run", "task_type": "jobs_rank_v1"},
+        "request": {"shortlist_max_items": 1, "shortlist_min_score": 0.1},
+        "shortlist_policy": {"max_items": 1, "freshness_weight_enabled": True, "freshness_max_bonus": 12},
+    }
+    result = jobs_shortlist_v1.execute(_task(payload), db=object())
+    top = result["content_json"]["shortlist"][0]
+    selection_reason = result["content_json"]["selection_reasons"][0]
+
+    assert top["job_id"] == "exact-recent"
+    assert selection_reason["location_match_reason"] == "exact_location_match"
+    assert selection_reason["recency_match_reason"] == "recent_match"
+    assert selection_reason["posted_age_days"] == 2
+    assert selection_reason["stale_rejected"] is False
+
+
 def test_jobs_shortlist_v1_empty_input_keeps_artifact_shape(monkeypatch) -> None:
     monkeypatch.setattr(
         jobs_shortlist_v1,

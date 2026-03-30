@@ -1554,6 +1554,11 @@ class PlannerJobsPresetCreate(BaseModel):
     experience_level: Optional[str] = None
     enabled_sources: Optional[List[str]] = None
     result_limit_per_source: Optional[int] = Field(default=None, ge=1, le=1000)
+    minimum_raw_jobs_total: Optional[int] = Field(default=None, ge=0, le=5000)
+    minimum_unique_jobs_total: Optional[int] = Field(default=None, ge=0, le=5000)
+    minimum_jobs_per_source: Optional[int] = Field(default=None, ge=0, le=1000)
+    stop_when_minimum_reached: Optional[bool] = None
+    collection_time_cap_seconds: Optional[int] = Field(default=None, ge=1, le=3600)
     max_queries_per_run: Optional[int] = Field(default=None, ge=1, le=20)
     shortlist_count: Optional[int] = Field(default=None, ge=1, le=10)
     freshness_preference: Optional[str] = None
@@ -2196,6 +2201,7 @@ def _build_jobs_workflow_summary(
             "jobs_after_filtering": _as_summary_int(collection_counts.get("kept_after_basic_filter_count")),
             "jobs_after_dedupe": _as_summary_int(normalization_counts.get("deduped_count"), _as_summary_int(pipeline_counts.get("deduped_count"))),
             "shortlisted_count": _as_summary_int(shortlist_json.get("shortlist_count"), _as_summary_int(pipeline_counts.get("shortlisted_count"))),
+            "minimum_reached": _as_summary_bool(collection_counts.get("minimum_reached")),
         },
         "notify": {
             "status": notify_status,
@@ -2219,6 +2225,11 @@ def _build_jobs_workflow_summary(
         "collection_quality": {
             "active_sources_label": active_sources_label,
             "source_contribution_summary": source_contribution_summary,
+            "minimum_targets": (
+                collection_observability.get("minimum_targets")
+                if isinstance(collection_observability.get("minimum_targets"), dict)
+                else {}
+            ),
             "by_source": source_rows,
             "operator_summary": (
                 collection_observability.get("operator_questions")
@@ -2936,6 +2947,11 @@ def upsert_jobs_digest_planner_template_route(req: PlannerJobsPresetCreate):
             experience_level=req.experience_level,
             enabled_sources=req.enabled_sources,
             result_limit_per_source=req.result_limit_per_source,
+            minimum_raw_jobs_total=req.minimum_raw_jobs_total,
+            minimum_unique_jobs_total=req.minimum_unique_jobs_total,
+            minimum_jobs_per_source=req.minimum_jobs_per_source,
+            stop_when_minimum_reached=req.stop_when_minimum_reached,
+            collection_time_cap_seconds=req.collection_time_cap_seconds,
             max_queries_per_run=req.max_queries_per_run,
             shortlist_count=req.shortlist_count,
             freshness_preference=req.freshness_preference,
@@ -2965,6 +2981,11 @@ def upsert_jobs_digest_planner_template_route(req: PlannerJobsPresetCreate):
             experience_level=req.experience_level,
             enabled_sources=req.enabled_sources,
             result_limit_per_source=req.result_limit_per_source,
+            minimum_raw_jobs_total=req.minimum_raw_jobs_total,
+            minimum_unique_jobs_total=req.minimum_unique_jobs_total,
+            minimum_jobs_per_source=req.minimum_jobs_per_source,
+            stop_when_minimum_reached=req.stop_when_minimum_reached,
+            collection_time_cap_seconds=req.collection_time_cap_seconds,
             max_queries_per_run=req.max_queries_per_run,
             shortlist_count=req.shortlist_count,
             freshness_preference=req.freshness_preference,

@@ -161,7 +161,12 @@ describe("WorkflowsPage", () => {
             keywords: ["python"],
             locations: ["Remote"],
             enabled_sources: ["linkedin", "indeed"],
-            result_limit_per_source: 20,
+            result_limit_per_source: 120,
+            minimum_raw_jobs_total: 120,
+            minimum_unique_jobs_total: 80,
+            minimum_jobs_per_source: 25,
+            stop_when_minimum_reached: true,
+            collection_time_cap_seconds: 120,
             shortlist_max_items: 5,
             shortlist_freshness_preference: "off"
           }
@@ -187,7 +192,8 @@ describe("WorkflowsPage", () => {
             raw_jobs_found: 420,
             jobs_after_filtering: 310,
             jobs_after_dedupe: 180,
-            shortlisted_count: 6
+            shortlisted_count: 6,
+            minimum_reached: true
           },
           notify: {
             status: "sent",
@@ -209,6 +215,13 @@ describe("WorkflowsPage", () => {
             why_top_jobs_won: ["Strong metadata completeness"]
           },
           collection_quality: {
+            minimum_targets: {
+              minimum_raw_jobs_total_requested: 120,
+              minimum_unique_jobs_total_requested: 80,
+              minimum_jobs_per_source_requested: 25,
+              minimum_reached: true,
+              reason_stopped: "minimum_reached"
+            },
             operator_summary: {
               searched_enough: "LinkedIn + Indeed active. LinkedIn contributed 220 raw jobs; Indeed contributed 200 raw jobs. 12 queries executed.",
               which_source_is_weak: "Lowest raw contribution came from Indeed.",
@@ -273,11 +286,24 @@ describe("WorkflowsPage", () => {
     expect(screen.getAllByText(/LinkedIn contributed 220 raw jobs/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Indeed contributed 200 raw jobs/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/broad discovery/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/120 raw \/ 80 unique \/ 25 per source/i).length).toBeGreaterThan(0);
+    expect(screen.getByText("Target Reached")).toBeInTheDocument();
+    expect(screen.getAllByText(/^Yes$/i).length).toBeGreaterThan(0);
+    expect(screen.getByText("Actual Counts")).toBeInTheDocument();
+    expect(screen.getByText(/420 raw \/ 180 unique/i)).toBeInTheDocument();
+    expect(screen.getByText("Stop Reason")).toBeInTheDocument();
+    expect(screen.getAllByText(/Minimum reached/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Max caps are advanced guardrails/i)).toBeInTheDocument();
+    expect(screen.getByText(/Minimum target = how much the pipeline tries to collect before stopping/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Desired titles"), { target: { value: "ML Engineer, Data Engineer" } });
     fireEvent.change(screen.getByLabelText("Search mode"), { target: { value: "precision_match" } });
     fireEvent.change(screen.getByLabelText("Preferred locations"), { target: { value: "Remote\nAustin, TX" } });
     fireEvent.change(screen.getByLabelText("Result limit per source"), { target: { value: "30" } });
+    fireEvent.change(screen.getByLabelText("Minimum raw jobs"), { target: { value: "90" } });
+    fireEvent.change(screen.getByLabelText("Minimum unique jobs"), { target: { value: "60" } });
+    fireEvent.change(screen.getByLabelText("Minimum per source"), { target: { value: "20" } });
+    fireEvent.change(screen.getByLabelText("Collection time cap (seconds)"), { target: { value: "150" } });
     fireEvent.change(screen.getByLabelText("Max queries per run"), { target: { value: "14" } });
     fireEvent.change(screen.getByLabelText("Shortlist size"), { target: { value: "7" } });
     fireEvent.change(screen.getByLabelText("Notification cooldown days"), { target: { value: "5" } });
@@ -291,6 +317,11 @@ describe("WorkflowsPage", () => {
     expect(payload.desired_titles).toEqual(["ML Engineer", "Data Engineer"]);
     expect(payload.preferred_locations).toEqual(["Remote", "Austin, TX"]);
     expect(payload.result_limit_per_source).toBe(30);
+    expect(payload.minimum_raw_jobs_total).toBe(90);
+    expect(payload.minimum_unique_jobs_total).toBe(60);
+    expect(payload.minimum_jobs_per_source).toBe(20);
+    expect(payload.stop_when_minimum_reached).toBe(true);
+    expect(payload.collection_time_cap_seconds).toBe(150);
     expect(payload.max_queries_per_run).toBe(14);
     expect(payload.shortlist_count).toBe(7);
     expect(payload.jobs_notification_cooldown_days).toBe(5);

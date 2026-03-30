@@ -740,6 +740,11 @@ def ensure_jobs_digest_template(
     experience_level: str | None = None,
     enabled_sources: list[str] | None = None,
     result_limit_per_source: int | None = None,
+    minimum_raw_jobs_total: int | None = None,
+    minimum_unique_jobs_total: int | None = None,
+    minimum_jobs_per_source: int | None = None,
+    stop_when_minimum_reached: bool | None = None,
+    collection_time_cap_seconds: int | None = None,
     max_queries_per_run: int | None = None,
     shortlist_count: int | None = None,
     freshness_preference: str | None = None,
@@ -865,7 +870,28 @@ def ensure_jobs_digest_template(
                 "No active job sources remained after filtering inactive or unsupported sources; defaulted to linkedin and indeed."
             )
 
-    max_jobs = max(1, min(int(result_limit_per_source or 250), 1000))
+    recommended_result_limit = 120 if normalized_search_mode == "broad_discovery" else 60
+    recommended_minimum_raw = 120 if normalized_search_mode == "broad_discovery" else 60
+    recommended_minimum_unique = 80 if normalized_search_mode == "broad_discovery" else 40
+    recommended_minimum_per_source = 25 if normalized_search_mode == "broad_discovery" else 15
+    recommended_time_cap = 120 if normalized_search_mode == "broad_discovery" else 90
+
+    max_jobs_source = result_limit_per_source if result_limit_per_source is not None else recommended_result_limit
+    minimum_raw_jobs_source = minimum_raw_jobs_total if minimum_raw_jobs_total is not None else recommended_minimum_raw
+    minimum_unique_jobs_source = (
+        minimum_unique_jobs_total if minimum_unique_jobs_total is not None else recommended_minimum_unique
+    )
+    minimum_per_source_source = (
+        minimum_jobs_per_source if minimum_jobs_per_source is not None else recommended_minimum_per_source
+    )
+    time_cap_source = collection_time_cap_seconds if collection_time_cap_seconds is not None else recommended_time_cap
+
+    max_jobs = max(1, min(int(max_jobs_source), 1000))
+    minimum_raw_jobs = max(0, min(int(minimum_raw_jobs_source), 5000))
+    minimum_unique_jobs = max(0, min(int(minimum_unique_jobs_source), 5000))
+    minimum_per_source_jobs = max(0, min(int(minimum_per_source_source), 1000))
+    stop_on_minimum = True if stop_when_minimum_reached is None else bool(stop_when_minimum_reached)
+    time_cap_seconds = max(1, min(int(time_cap_source), 3600))
     max_queries_default = 14 if normalized_search_mode == "broad_discovery" else 8
     max_queries = max(1, min(int(max_queries_per_run or max_queries_default), 20))
     shortlist_size = max(1, min(int(shortlist_count or 10), 10))
@@ -892,6 +918,11 @@ def ensure_jobs_digest_template(
         "source_configuration_notes": source_configuration_notes,
         "max_jobs_per_source": max_jobs,
         "result_limit_per_source": max_jobs,
+        "minimum_raw_jobs_total": minimum_raw_jobs,
+        "minimum_unique_jobs_total": minimum_unique_jobs,
+        "minimum_jobs_per_source": minimum_per_source_jobs,
+        "stop_when_minimum_reached": stop_on_minimum,
+        "collection_time_cap_seconds": time_cap_seconds,
         "max_queries_per_run": max_queries,
         "enable_query_expansion": normalized_search_mode == "broad_discovery",
         "profile_mode": "resume_profile",

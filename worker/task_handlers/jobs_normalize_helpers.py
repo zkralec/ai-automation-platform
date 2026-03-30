@@ -77,6 +77,14 @@ _RELATIVE_POSTED_AT_RE = re.compile(
 _RELATIVE_PLUS_DAYS_RE = re.compile(r"(?P<amount>\d+)\+\s*days?", re.IGNORECASE)
 _POSTED_TODAY_RE = re.compile(r"\b(today|just posted|posted today)\b", re.IGNORECASE)
 _POSTED_YESTERDAY_RE = re.compile(r"\byesterday\b", re.IGNORECASE)
+_BROAD_LOCATION_KEYS = {
+    "united states",
+    "united states of america",
+    "usa",
+    "us",
+    "u s",
+    "north america",
+}
 
 
 def _as_text(value: Any) -> str | None:
@@ -175,6 +183,34 @@ def _normalize_location_key(location: str | None, remote_type: str | None) -> st
     low = low.replace(",", " ")
     low = _compact_text(low)
     return low or "unspecified"
+
+
+def normalize_location_for_matching(value: Any, remote_type: Any = None) -> str:
+    location_text = _normalize_location(value) or _as_text(value)
+    normalized_remote_type = _normalize_work_mode(remote_type)
+    if normalized_remote_type is None and isinstance(value, str):
+        normalized_remote_type = _normalize_work_mode(value)
+    return _normalize_location_key(location_text, normalized_remote_type)
+
+
+def classify_location_quality(
+    location: Any,
+    *,
+    location_normalized: Any = None,
+    remote_type: Any = None,
+) -> str:
+    location_text = _normalize_location(location) or _as_text(location)
+    normalized_key = _as_text(location_normalized) or normalize_location_for_matching(location_text, remote_type)
+    work_mode = _normalize_work_mode(remote_type) or _normalize_work_mode(location_text)
+    if not location_text and not work_mode:
+        return "missing"
+    if normalized_key in {"remote", "hybrid", "onsite"}:
+        return "mode_only"
+    if normalized_key in _BROAD_LOCATION_KEYS:
+        return "broad"
+    if location_text and len(_canonical_text(location_text)) <= 2:
+        return "weak"
+    return "structured"
 
 
 def _canonicalize_title(title: str | None) -> str:
@@ -382,6 +418,76 @@ def _normalize_posted_at(value: Any, *, reference_time: datetime | None) -> tupl
     return None, text
 
 
+def _normalize_posted_age_days(
+    *,
+    posted_at: str | None,
+    posted_at_raw: str | None,
+    raw_value: Any,
+    reference_time: datetime,
+) -> int | None:
+    if isinstance(raw_value, int):
+        return max(raw_value, 0)
+    if isinstance(raw_value, float):
+        return max(int(raw_value), 0)
+
+    parsed = _parse_datetime(posted_at)
+    if parsed is not None:
+        delta = reference_time - parsed
+        return max(int(delta.total_seconds() // 86400), 0)
+
+    _, fallback_raw = _normalize_posted_at(posted_at_raw, reference_time=reference_time)
+    if fallback_raw is not None:
+        posted_at_raw = fallback_raw
+    if not posted_at_raw:
+        return None
+    normalized, _ = _normalize_posted_at(posted_at_raw, reference_time=reference_time)
+    parsed_fallback = _parse_datetime(normalized)
+    if parsed_fallback is None:
+        return None
+    delta = reference_time - parsed_fallback
+    return max(int(delta.total_seconds() // 86400), 0)
+
+
+def resolve_posted_age_days(
+    *,
+    posted_age_days: Any = None,
+    posted_at: Any = None,
+    posted_at_raw: Any = None,
+    reference_time: datetime | None = None,
+) -> int | None:
+    reference = reference_time or datetime.now(timezone.utc)
+    return _normalize_posted_age_days(
+        posted_at=_as_text(posted_at),
+        posted_at_raw=_as_text(posted_at_raw),
+        raw_value=posted_age_days,
+        reference_time=reference,
+    )
+
+
+def classify_recency_quality(
+    *,
+    posted_at_normalized: Any = None,
+    posted_at_raw: Any = None,
+    posted_age_days: Any = None,
+    reference_time: datetime | None = None,
+) -> str:
+    age_days = resolve_posted_age_days(
+        posted_age_days=posted_age_days,
+        posted_at=posted_at_normalized,
+        posted_at_raw=posted_at_raw,
+        reference_time=reference_time,
+    )
+    normalized = _as_text(posted_at_normalized)
+    raw = _as_text(posted_at_raw)
+    if age_days is not None and normalized:
+        if raw:
+            return "relative_normalized"
+        return "timestamp"
+    if age_days is not None:
+        return "age_only"
+    return "missing"
+
+
 def infer_remote_type(*, title: str | None, location: str | None, description_snippet: str | None) -> str | None:
     haystack = " ".join(
         part.strip()
@@ -450,9 +556,29 @@ def _build_source_url(raw_job: dict[str, Any]) -> str | None:
 def metadata_quality_details(job: dict[str, Any]) -> dict[str, Any]:
     company = _as_text(job.get("company"))
     location = _as_text(job.get("location"))
-    posted_at = _as_text(job.get("posted_at"))
+    posted_at = _as_text(job.get("posted_at_normalized")) or _as_text(job.get("posted_at"))
+    posted_at_raw = _as_text(job.get("posted_at_raw"))
+    posted_age_days = resolve_posted_age_days(
+        posted_age_days=job.get("posted_age_days"),
+        posted_at=posted_at,
+        posted_at_raw=posted_at_raw,
+    )
+    location_normalized = _as_text(job.get("location_normalized")) or normalize_location_for_matching(
+        location,
+        job.get("remote_type") or job.get("work_mode"),
+    )
     source_url = _as_text(job.get("source_url"))
     work_mode = _normalize_work_mode(job.get("work_mode")) or _normalize_work_mode(job.get("remote_type"))
+    location_quality = classify_location_quality(
+        location,
+        location_normalized=location_normalized,
+        remote_type=work_mode,
+    )
+    recency_quality = classify_recency_quality(
+        posted_at_normalized=posted_at,
+        posted_at_raw=posted_at_raw,
+        posted_age_days=posted_age_days,
+    )
     salary_present = any(
         value is not None
         for value in (_as_float(job.get("salary_min")), _as_float(job.get("salary_max")))
@@ -466,12 +592,20 @@ def metadata_quality_details(job: dict[str, Any]) -> dict[str, Any]:
         score += 2.0
     if company:
         score += 25.0
-    if location:
+    if location_quality == "structured":
         score += 12.0
+    elif location_quality == "mode_only":
+        score += 8.0
+    elif location_quality == "broad":
+        score += 5.0
+    elif location:
+        score += 3.0
     if source_url:
         score += 18.0 if source_url_kind == "direct" else 8.0
-    if posted_at:
+    if recency_quality in {"timestamp", "relative_normalized"}:
         score += 15.0
+    elif recency_quality == "age_only":
+        score += 11.0
     if work_mode:
         score += 10.0
     if salary_present:
@@ -486,9 +620,11 @@ def metadata_quality_details(job: dict[str, Any]) -> dict[str, Any]:
         "missing_company": not bool(company),
         "missing_source_url": not bool(source_url),
         "missing_posted_at": not bool(posted_at),
-        "missing_location": not bool(location),
+        "missing_location": location_quality in {"missing", "weak"},
         "source_url_kind": source_url_kind,
         "has_direct_source_url": source_url_kind == "direct",
+        "metadata_quality_location": location_quality,
+        "metadata_quality_recency": recency_quality,
     }
 
 
@@ -539,12 +675,33 @@ def normalize_job_record(raw_job: dict[str, Any], *, index: int) -> dict[str, An
         or datetime.now(timezone.utc)
     )
     posted_at, posted_at_raw = _normalize_posted_at(raw_job.get("posted_at"), reference_time=reference_time)
+    if posted_at_raw is None:
+        posted_at_raw = _as_text(source_metadata.get("posted_at_text"))
+    posted_age_days = _normalize_posted_age_days(
+        posted_at=posted_at,
+        posted_at_raw=posted_at_raw,
+        raw_value=raw_job.get("posted_age_days"),
+        reference_time=reference_time,
+    )
+    location_normalized = _normalize_location_key(location, remote_type)
+    metadata_quality_location = classify_location_quality(
+        location,
+        location_normalized=location_normalized,
+        remote_type=remote_type,
+    )
+    metadata_quality_recency = classify_recency_quality(
+        posted_at_normalized=posted_at,
+        posted_at_raw=posted_at_raw,
+        posted_age_days=posted_age_days,
+        reference_time=reference_time,
+    )
 
     normalized = {
         "normalized_job_id": f"norm-{index + 1:06d}",
         "title": title,
         "company": company,
         "location": location,
+        "location_normalized": location_normalized,
         "remote_type": remote_type,
         "work_mode": remote_type,
         "salary_min": salary_min,
@@ -557,7 +714,11 @@ def normalize_job_record(raw_job: dict[str, Any], *, index: int) -> dict[str, An
         "url": _as_text(raw_job.get("url")),
         "description_snippet": description_snippet,
         "posted_at": posted_at,
+        "posted_at_normalized": posted_at,
         "posted_at_raw": posted_at_raw,
+        "posted_age_days": posted_age_days,
+        "metadata_quality_location": metadata_quality_location,
+        "metadata_quality_recency": metadata_quality_recency,
         "experience_level": experience_level,
         "seniority": experience_level,
         "source_metadata": source_metadata,
