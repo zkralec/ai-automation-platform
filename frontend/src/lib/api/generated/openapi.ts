@@ -6,22 +6,6 @@
 export type TaskStatus = "queued" | "running" | "success" | "failed" | "failed_permanent" | "blocked_budget";
 export type RunStatus = "queued" | "running" | "success" | "failed";
 
-export interface FailureDiagnosticsOut {
-  summary: string;
-  category: string;
-  source: string;
-  stage: string;
-  error_type?: string | null;
-  error_message?: string | null;
-  upstream_service?: string | null;
-  retry_scheduled: boolean;
-  retry_at?: string | null;
-  is_browser_disconnect: boolean;
-  is_task_execution_failure: boolean;
-  is_queue_enqueue_failure: boolean;
-  is_scheduler_runtime_failure: boolean;
-}
-
 export interface TaskOut {
   id: string;
   created_at: string;
@@ -40,7 +24,6 @@ export interface TaskOut {
   max_cost_usd?: number | null;
   expected_tokens_in?: number | null;
   expected_tokens_out?: number | null;
-  diagnostics?: FailureDiagnosticsOut | null;
 }
 
 export interface RunOut {
@@ -57,7 +40,6 @@ export interface RunOut {
   cost_usd?: number | null;
   error?: string | null;
   created_at: string;
-  diagnostics?: FailureDiagnosticsOut | null;
 }
 
 export interface TaskResultOut {
@@ -189,26 +171,4 @@ export interface AgentHeartbeatOut {
   last_seen_at: string;
   status: string;
   metadata_json?: unknown;
-}
-
-export interface RuntimeAgentStatusOut {
-  name: string;
-  healthy: boolean;
-  status: string;
-  last_seen_at?: string | null;
-  age_seconds?: number | null;
-  message?: string | null;
-}
-
-export interface RuntimeStatusOut {
-  captured_at: string;
-  api_healthy: boolean;
-  ready_status: string;
-  ready_error?: string | null;
-  redis_reachable: boolean;
-  queue_depth?: number | null;
-  stale_after_seconds: number;
-  scheduler_heartbeat: RuntimeAgentStatusOut;
-  worker_heartbeat: RuntimeAgentStatusOut;
-  last_scheduler_tick_at?: string | null;
 }
