@@ -78,6 +78,7 @@ export function saveRtx5090Preset(input: {
 
 export function saveJobsPreset(input: {
   interval_seconds: number;
+  search_mode?: "broad_discovery" | "precision_match" | null;
   desired_title?: string | null;
   desired_titles?: string[] | null;
   keywords?: string[] | null;
@@ -88,8 +89,17 @@ export function saveJobsPreset(input: {
   experience_level?: string | null;
   enabled_sources?: string[] | null;
   result_limit_per_source?: number | null;
+  minimum_raw_jobs_total?: number | null;
+  minimum_unique_jobs_total?: number | null;
+  minimum_jobs_per_source?: number | null;
+  stop_when_minimum_reached?: boolean | null;
+  collection_time_cap_seconds?: number | null;
+  max_queries_per_run?: number | null;
   shortlist_count?: number | null;
   freshness_preference?: string | null;
+  jobs_notification_cooldown_days?: number | null;
+  jobs_shortlist_repeat_penalty?: number | null;
+  resurface_seen_jobs?: boolean | null;
   desired_salary_min?: number | null;
   desired_salary_max?: number | null;
   experience_levels?: string[] | null;

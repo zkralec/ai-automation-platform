@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { DataTableWrapper } from "@/components/common/data-table-wrapper";
 import { DetailsSurface } from "@/components/common/details-surface";
 import { EmptyState } from "@/components/common/empty-state";
@@ -17,6 +17,13 @@ import type { RunOut, TaskOut, TaskResultOut } from "@/lib/api/generated/openapi
 import { errorMessage } from "@/lib/utils/errors";
 import { formatCost, formatDurationMs, formatIso } from "@/lib/utils/format";
 
+const JOBS_WATCHER_ROUTE = "/workflows?watcher=preset-jobs-digest-scan";
+
+type JobsPreviewAction = {
+  label: string;
+  to: string;
+};
+
 type RunFailureMode = "retryable" | "permanent" | null;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -26,6 +33,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function asText(value: unknown): string | null {
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return null;
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
   return null;
 }
 
@@ -106,6 +132,15 @@ function taskFailureMode(task: TaskOut, attemptCount: number): RunFailureMode {
     return attemptCount >= task.max_attempts ? "permanent" : "retryable";
   }
   return null;
+}
+
+function describeDiagnostics(task: TaskOut | undefined): string | null {
+  if (!task?.diagnostics) return task?.error || null;
+  const bits = [task.diagnostics.summary];
+  if (task.diagnostics.upstream_service) bits.push(`upstream=${task.diagnostics.upstream_service}`);
+  if (task.diagnostics.source) bits.push(`source=${task.diagnostics.source}`);
+  if (task.diagnostics.stage) bits.push(`stage=${task.diagnostics.stage}`);
+  return bits.filter(Boolean).join(" · ");
 }
 
 function PreviewFallback({ payload }: { payload: unknown }): JSX.Element {
@@ -255,8 +290,62 @@ function DealsPreview({ resultPayload }: { resultPayload: unknown }): JSX.Elemen
   );
 }
 
-function JobsPreview({ resultPayload }: { resultPayload: unknown }): JSX.Element {
-  const jobs = pickRecordArray(resultPayload, [
+function formatPercent(value: unknown): string {
+  const parsed = asNumber(value);
+  if (parsed === null) return "0%";
+  return `${Math.round(parsed)}%`;
+}
+
+function observabilityRecord(payload: unknown, key: string): Record<string, unknown> | null {
+  if (!isRecord(payload)) return null;
+  const value = payload[key];
+  return isRecord(value) ? value : null;
+}
+
+function buildRunsTaskLink(taskId: string | null | undefined): string {
+  if (!taskId) return "/runs";
+  const params = new URLSearchParams();
+  params.set("task_id", taskId);
+  return `/runs?${params.toString()}`;
+}
+
+function buildRunsTaskTypeLink(taskType: string, status?: string): string {
+  const params = new URLSearchParams();
+  params.set("task_type", taskType);
+  if (status) params.set("status", status);
+  return `/runs?${params.toString()}`;
+}
+
+function renderJobsPreviewActions(actions: JobsPreviewAction[]): JSX.Element | null {
+  if (actions.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-2">
+      {actions.map((action) => (
+        <Button key={`${action.label}-${action.to}`} asChild size="sm" variant="outline">
+          <Link to={action.to}>{action.label}</Link>
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function jobsStageActions(taskType: string, taskId: string | null | undefined): JobsPreviewAction[] {
+  const actions: JobsPreviewAction[] = [
+    { label: "Inspect Latest Run", to: buildRunsTaskLink(taskId) },
+    { label: "Open Watcher Config", to: JOBS_WATCHER_ROUTE }
+  ];
+
+  if (taskType === "jobs_collect_v1" || taskType === "jobs_normalize_v1") {
+    actions.push({ label: "Inspect Source Coverage", to: buildRunsTaskTypeLink("jobs_collect_v1") });
+  }
+  if (taskType === "jobs_digest_v2" || taskType === "jobs_shortlist_v1") {
+    actions.push({ label: "Inspect Digest Artifact", to: buildRunsTaskTypeLink("jobs_digest_v2") });
+  }
+  return actions;
+}
+
+function jobsPreviewRows(resultPayload: unknown): Array<Record<string, unknown>> {
+  return pickRecordArray(resultPayload, [
     "jobs",
     "openings",
     "results",
@@ -267,8 +356,399 @@ function JobsPreview({ resultPayload }: { resultPayload: unknown }): JSX.Element
     "normalized_jobs",
     "ranked_jobs",
     "shortlist",
-    "top_jobs"
+    "top_jobs",
+    "digest_jobs"
   ]);
+}
+
+function textArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((row) => asText(row)?.trim() || "").filter(Boolean);
+}
+
+function isInactiveSourceCoverageRow(value: Record<string, unknown>): boolean {
+  const sourceErrorType = asText(value.source_error_type);
+  const status = asText(value.status);
+  return sourceErrorType === "source_disabled" || status === "skipped";
+}
+
+function displaySourceName(source: string, value: Record<string, unknown>): string {
+  return asText(value.source_label) || (source === "linkedin" ? "LinkedIn" : source === "indeed" ? "Indeed" : source);
+}
+
+function JobsStagePreview({
+  taskType,
+  resultPayload,
+  taskId
+}: {
+  taskType: string;
+  resultPayload: unknown;
+  taskId?: string | null;
+}): JSX.Element | null {
+  const jobsSearchMode = (() => {
+    const artifact = isRecord(resultPayload) ? resultPayload : {};
+    const request = isRecord(artifact.request) ? artifact.request : {};
+    return asText(artifact.search_mode) || asText(request.search_mode) || null;
+  })();
+
+  if (taskType === "jobs_collect_v1" || taskType === "jobs_normalize_v1") {
+    const observability =
+      taskType === "jobs_collect_v1"
+        ? observabilityRecord(resultPayload, "collection_observability")
+        : observabilityRecord(resultPayload, "normalization_observability");
+    if (!observability) return null;
+
+    const waterfall = isRecord(observability.waterfall) ? observability.waterfall : {};
+    const operatorQuestions = isRecord(observability.operator_questions) ? observability.operator_questions : {};
+    const runPreview = isRecord(observability.run_preview) ? observability.run_preview : {};
+    const previewMessages = textArray(runPreview.messages);
+    const bySourceRaw = isRecord(observability.by_source) ? observability.by_source : {};
+    const rows = Object.entries(bySourceRaw)
+      .filter(([, value]) => isRecord(value))
+      .filter(([, value]) => !isInactiveSourceCoverageRow(value as Record<string, unknown>))
+      .map(([source, value]) => ({ source, value: value as Record<string, unknown> }));
+
+    const summaryCards =
+      taskType === "jobs_collect_v1"
+        ? [
+            { label: "Raw Discovered", value: asNumber(waterfall.raw_jobs_discovered) ?? 0 },
+            { label: "Query Count", value: asNumber(waterfall.queries_executed) ?? asNumber(waterfall.query_count_used) ?? 0 },
+            { label: "Kept After Filter", value: asNumber(waterfall.kept_after_basic_filter) ?? 0 },
+            { label: "Deduped", value: asNumber(waterfall.deduped_in_collection) ?? 0 }
+          ]
+        : [
+            { label: "Raw Discovered", value: asNumber(waterfall.raw_jobs_discovered) ?? 0 },
+            { label: "Normalized", value: asNumber(waterfall.normalized_count) ?? 0 },
+            { label: "Unique After Dedupe", value: asNumber(waterfall.deduped_count) ?? 0 },
+            { label: "Duplicates Collapsed", value: asNumber(waterfall.duplicates_collapsed) ?? 0 }
+          ];
+
+    const questionCards = [
+      { label: "Did We Search Enough?", value: asText(operatorQuestions.searched_enough) || asText(operatorQuestions.did_we_search_enough) || "-" },
+      { label: "Which Source Is Weak?", value: asText(operatorQuestions.which_source_is_weak) || "-" },
+      { label: "Why Did Raw Count Collapse?", value: asText(operatorQuestions.why_raw_count_collapsed) || asText(operatorQuestions.why_did_raw_count_collapse) || "-" },
+      { label: "Are We Missing Metadata?", value: asText(operatorQuestions.are_we_missing_metadata) || "-" }
+    ];
+
+    return (
+      <div className="space-y-3">
+        <div className="grid gap-2 sm:grid-cols-4">
+          {summaryCards.map((card) => (
+            <div key={card.label} className="rounded border border-border bg-card p-2 text-xs">
+              <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">{card.label}</div>
+              <div className="mt-1 text-sm font-semibold">{card.value}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-2">
+          {questionCards.map((card) => (
+            <div key={card.label} className="rounded border border-border bg-muted/20 p-3 text-xs">
+              <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">{card.label}</div>
+              <div className="mt-1">{card.value}</div>
+            </div>
+          ))}
+        </div>
+
+        {jobsSearchMode ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+            <div className="mt-1">{jobsSearchMode.replace(/_/g, " ")}</div>
+          </div>
+        ) : null}
+
+        {previewMessages.length > 0 ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Preview Signals</div>
+            <div className="mt-2 space-y-1">
+              {previewMessages.map((message) => (
+                <div key={message}>{message}</div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="rounded border border-border bg-card p-3">
+          <div className="mb-2 text-xs font-medium uppercase tracking-[0.06em] text-muted-foreground">By Source</div>
+          {rows.length === 0 ? (
+            <div className="text-xs text-muted-foreground">No source-level observability found.</div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Source</TableHead>
+                  <TableHead>Health</TableHead>
+                  <TableHead>Jobs</TableHead>
+                  <TableHead>Pages</TableHead>
+                  <TableHead>Signals</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map(({ source, value }) => {
+                  const jobsSummary =
+                    taskType === "jobs_collect_v1"
+                      ? `${asNumber(value.raw_jobs_discovered) ?? 0} raw -> ${asNumber(value.kept_after_basic_filter) ?? 0} kept`
+                      : `${asNumber(value.raw_jobs_discovered) ?? 0} raw -> ${asNumber(value.kept_after_basic_filter) ?? 0} kept -> ${asNumber(value.deduped_unique_groups) ?? 0} unique`;
+                  const pagesSummary = `${asNumber(value.pages_attempted) ?? asNumber(value.pages_fetched) ?? 0} attempted`;
+                  const gaps =
+                    asText(value.weakness_summary) ||
+                    [
+                      `company ${formatPercent(value.missing_company_rate)}`,
+                      `post date ${formatPercent(value.missing_posted_at_rate)}`,
+                      `link ${formatPercent(value.missing_source_url_rate)}`,
+                      `location ${formatPercent(value.missing_location_rate)}`
+                    ].join(", ");
+                  const healthStatus = asText(value.status) || "unknown";
+                  const usableJobs = asNumber(value.jobs_kept) ?? asNumber(value.final_raw_jobs) ?? 0;
+                  const signals = [
+                    asBoolean(value.under_target) ? "under target" : null,
+                    asBoolean(value.suspected_blocking)
+                      ? `suspected blocking${asText(value.suspected_blocking_reason) ? ` (${asText(value.suspected_blocking_reason)})` : ""}`
+                      : null,
+                    gaps
+                  ]
+                    .filter(Boolean)
+                    .join(" · ");
+
+                  return (
+                    <TableRow key={source}>
+                      <TableCell>
+                        <div className="space-y-0.5">
+                          <div className="font-medium">{displaySourceName(source, value)}</div>
+                          {usableJobs <= 0 ? (
+                            <div className="text-[11px] text-muted-foreground">No usable jobs collected</div>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        <StatusBadge status={healthStatus} />
+                      </TableCell>
+                      <TableCell className="text-xs">{jobsSummary}</TableCell>
+                      <TableCell className="text-xs">{pagesSummary}</TableCell>
+                      <TableCell className="text-xs">{signals}</TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+
+        {renderJobsPreviewActions(jobsStageActions(taskType, taskId))}
+      </div>
+    );
+  }
+
+  if (taskType === "jobs_rank_v1") {
+    const artifact = isRecord(resultPayload) ? resultPayload : {};
+    const pipelineCounts = isRecord(artifact.pipeline_counts) ? artifact.pipeline_counts : {};
+    const debug = isRecord(artifact.model_usage) ? artifact.model_usage : {};
+    const rankPolicy = isRecord(artifact.rank_policy) ? artifact.rank_policy : {};
+    const rankedJobs = jobsPreviewRows(resultPayload);
+    const llmMeta = isRecord(artifact.jobs_scored_artifact) && isRecord((artifact.jobs_scored_artifact as Record<string, unknown>).llm_meta)
+      ? ((artifact.jobs_scored_artifact as Record<string, unknown>).llm_meta as Record<string, unknown>)
+      : {};
+    const cards = [
+      { label: "Input Jobs", value: asNumber(artifact.input_jobs_count) ?? 0 },
+      { label: "Filtered Jobs", value: asNumber(artifact.filtered_jobs_count) ?? 0 },
+      { label: "Scored Jobs", value: asNumber(pipelineCounts.scored_count) ?? rankedJobs.length },
+      { label: "LLM Attempts", value: asNumber(llmMeta.attempts_total) ?? 0 }
+    ];
+    const llmStatus = [
+      `runtime ${asText(debug.llm_runtime_enabled) || "false"}`,
+      `fallback ${asText(llmMeta.fallback_used) || "false"}`
+    ].join(" · ");
+
+    return (
+      <div className="space-y-3">
+        <div className="grid gap-2 sm:grid-cols-4">
+          {cards.map((card) => (
+            <div key={card.label} className="rounded border border-border bg-card p-2 text-xs">
+              <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">{card.label}</div>
+              <div className="mt-1 text-sm font-semibold">{card.value}</div>
+            </div>
+          ))}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">LLM Status</div>
+            <div className="mt-1">{llmStatus}</div>
+          </div>
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Prompt Version</div>
+            <div className="mt-1">{asText(debug.prompt_version) || asText(rankPolicy.prompt_version) || "-"}</div>
+          </div>
+        </div>
+        {jobsSearchMode ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+            <div className="mt-1">{jobsSearchMode.replace(/_/g, " ")}</div>
+          </div>
+        ) : null}
+        {rankedJobs.length > 0 ? (
+          <div className="space-y-2 rounded border border-border bg-card p-3">
+            {rankedJobs.slice(0, 5).map((row, idx) => (
+              <div key={`${asText(row.title) || "job"}-${idx}`} className="rounded border border-border/80 bg-muted/20 px-2 py-2 text-xs">
+                <div className="font-medium">{asText(row.title) || `Job #${idx + 1}`}</div>
+                <div className="mt-1 text-muted-foreground">
+                  {(asText(row.company) || "unknown")} · score {asNumber(row.overall_score) ?? asNumber(row.score) ?? "-"} · metadata {asNumber(row.metadata_quality_score) ?? "-"}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {renderJobsPreviewActions(jobsStageActions(taskType, taskId))}
+      </div>
+    );
+  }
+
+  if (taskType === "jobs_shortlist_v1") {
+    const artifact = isRecord(resultPayload) ? resultPayload : {};
+    const summary = isRecord(artifact.shortlist_summary_metadata) ? artifact.shortlist_summary_metadata : {};
+    const pipelineCounts = isRecord(artifact.pipeline_counts) ? artifact.pipeline_counts : {};
+    const history = isRecord(artifact.history_observability) ? artifact.history_observability : {};
+    const shortlist = jobsPreviewRows(resultPayload);
+    const cards = [
+      { label: "Shortlisted", value: asNumber(artifact.shortlist_count) ?? shortlist.length },
+      { label: "Scored Input", value: asNumber(summary.input_scored_count) ?? asNumber(pipelineCounts.scored_count) ?? 0 },
+      { label: "Newly Discovered", value: asNumber(history.selected_newly_discovered_count) ?? 0 },
+      { label: "Resurfaced", value: asNumber(history.selected_resurfaced_count) ?? 0 }
+    ];
+    const historyBits = [
+      `previously shortlisted ${asNumber(history.selected_previously_shortlisted_count) ?? 0}`,
+      `previously notified ${asNumber(history.selected_previously_notified_count) ?? 0}`,
+      `cooldown suppressed ${asNumber(history.cooldown_suppressed_count) ?? 0}`
+    ].join(" · ");
+
+    return (
+      <div className="space-y-3">
+        <div className="grid gap-2 sm:grid-cols-4">
+          {cards.map((card) => (
+            <div key={card.label} className="rounded border border-border bg-card p-2 text-xs">
+              <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">{card.label}</div>
+              <div className="mt-1 text-sm font-semibold">{card.value}</div>
+            </div>
+          ))}
+        </div>
+        <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+          <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">History / Repeat Behavior</div>
+          <div className="mt-1">{historyBits}</div>
+        </div>
+        {jobsSearchMode ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+            <div className="mt-1">{jobsSearchMode.replace(/_/g, " ")}</div>
+          </div>
+        ) : null}
+        {shortlist.length > 0 ? (
+          <div className="space-y-2 rounded border border-border bg-card p-3">
+            {shortlist.slice(0, 5).map((row, idx) => (
+              <div key={`${asText(row.title) || "job"}-${idx}`} className="rounded border border-border/80 bg-muted/20 px-2 py-2 text-xs">
+                <div className="font-medium">{asText(row.title) || `Job #${idx + 1}`}</div>
+                <div className="mt-1 text-muted-foreground">
+                  {(asText(row.company) || "unknown")} · {asText(row.source) || "unknown source"}
+                </div>
+                <div className="mt-1 text-muted-foreground">
+                  {row.newly_discovered === true ? "new" : row.resurfaced_from_prior_runs === true ? "resurfaced" : "prior run state unknown"}
+                  {row.previously_shortlisted === true ? " · previously shortlisted" : ""}
+                  {row.previously_notified === true ? " · previously notified" : ""}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {renderJobsPreviewActions(jobsStageActions(taskType, taskId))}
+      </div>
+    );
+  }
+
+  if (taskType === "jobs_digest_v2") {
+    const artifact = isRecord(resultPayload) ? resultPayload : {};
+    const pipelineCounts = isRecord(artifact.pipeline_counts) ? artifact.pipeline_counts : {};
+    const notifyDecision = isRecord(artifact.notify_decision) ? artifact.notify_decision : {};
+    const llmMeta = isRecord(artifact.model_usage) ? artifact.model_usage as Record<string, unknown> : {};
+    const digestJobs = jobsPreviewRows(resultPayload);
+    const cards = [
+      { label: "Shortlist Count", value: asNumber(pipelineCounts.shortlisted_count) ?? digestJobs.length },
+      { label: "Notify", value: asText(notifyDecision.should_notify) || "false" },
+      { label: "LLM Attempts", value: asNumber(llmMeta.attempts) ?? 0 },
+      { label: "Generation Mode", value: asText(artifact.generation_mode) || "-" }
+    ];
+
+    return (
+      <div className="space-y-3">
+        <div className="grid gap-2 sm:grid-cols-4">
+          {cards.map((card) => (
+            <div key={card.label} className="rounded border border-border bg-card p-2 text-xs">
+              <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">{card.label}</div>
+              <div className="mt-1 text-sm font-semibold">{card.value}</div>
+            </div>
+          ))}
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Notify Decision</div>
+            <div className="mt-1">{asText(notifyDecision.reason) || "-"}</div>
+          </div>
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Fallback Status</div>
+            <div className="mt-1">{`fallback ${asText(llmMeta.fallback_used) || "false"} · strict ${asText(llmMeta.strict_failure) || "false"}`}</div>
+          </div>
+        </div>
+        {jobsSearchMode ? (
+          <div className="rounded border border-border bg-muted/20 p-3 text-xs">
+            <div className="font-medium uppercase tracking-[0.06em] text-muted-foreground">Search Mode</div>
+            <div className="mt-1">{jobsSearchMode.replace(/_/g, " ")}</div>
+          </div>
+        ) : null}
+        {(asText(artifact.summary) || asText(artifact.notification_excerpt)) ? (
+          <div className="rounded border border-border bg-card p-3 text-xs leading-relaxed">
+            {asText(artifact.summary) || asText(artifact.notification_excerpt)}
+          </div>
+        ) : null}
+        {digestJobs.length > 0 ? (
+          <div className="space-y-2 rounded border border-border bg-card p-3">
+            {digestJobs.slice(0, 4).map((row, idx) => {
+              const url = asText(row.source_url) || asText(row.url);
+              return (
+                <div key={`${asText(row.title) || "job"}-${idx}`} className="rounded border border-border/80 bg-muted/20 px-2 py-2 text-xs">
+                  <div className="font-medium">{asText(row.title) || `Job #${idx + 1}`}</div>
+                  <div className="mt-1 text-muted-foreground">
+                    {(asText(row.company) || "unknown")} · {asText(row.source) || "unknown source"}{asText(row.posted_display) || asText(row.posted) ? ` · ${asText(row.posted_display) || asText(row.posted)}` : ""}
+                  </div>
+                  {url ? (
+                    <a className="mt-1 inline-block break-all text-primary underline" href={url} target="_blank" rel="noreferrer">
+                      {url}
+                    </a>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+        {renderJobsPreviewActions(jobsStageActions(taskType, taskId))}
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function JobsPreviewBody({
+  taskType,
+  resultPayload,
+  taskId
+}: {
+  taskType: string | undefined;
+  resultPayload: unknown;
+  taskId?: string | null;
+}): JSX.Element {
+  if (taskType === "jobs_collect_v1" || taskType === "jobs_normalize_v1" || taskType === "jobs_rank_v1" || taskType === "jobs_shortlist_v1" || taskType === "jobs_digest_v2") {
+    const stagePreview = JobsStagePreview({ taskType, resultPayload, taskId });
+    if (stagePreview) return stagePreview;
+  }
+
+  const jobs = jobsPreviewRows(resultPayload);
   if (jobs.length === 0) {
     return <PreviewFallback payload={resultPayload} />;
   }
@@ -305,7 +785,17 @@ function JobsPreview({ resultPayload }: { resultPayload: unknown }): JSX.Element
   );
 }
 
-function ResultPreview({ taskType, resultPayload, taskPayload }: { taskType: string | undefined; resultPayload: unknown; taskPayload: unknown | null }): JSX.Element {
+function ResultPreview({
+  taskType,
+  resultPayload,
+  taskPayload,
+  taskId
+}: {
+  taskType: string | undefined;
+  resultPayload: unknown;
+  taskPayload: unknown | null;
+  taskId?: string | null;
+}): JSX.Element {
   if (!taskType) return <PreviewFallback payload={resultPayload} />;
 
   if (taskType === "notify_v1") {
@@ -315,7 +805,7 @@ function ResultPreview({ taskType, resultPayload, taskPayload }: { taskType: str
     return <DealsPreview resultPayload={resultPayload} />;
   }
   if (taskType.startsWith("jobs_")) {
-    return <JobsPreview resultPayload={resultPayload} />;
+    return <JobsPreviewBody taskType={taskType} resultPayload={resultPayload} taskId={taskId} />;
   }
 
   return <PreviewFallback payload={resultPayload} />;
@@ -323,7 +813,8 @@ function ResultPreview({ taskType, resultPayload, taskPayload }: { taskType: str
 
 export function RunsPage(): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const selectedTaskIdFromQuery = searchParams.get("task_id");
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(selectedTaskIdFromQuery);
   const statusFilter = searchParams.get("status") || "all";
   const taskTypeFilterFromQuery = searchParams.get("task_type") || "";
   const [taskTypeFilter, setTaskTypeFilter] = useState(taskTypeFilterFromQuery);
@@ -332,11 +823,21 @@ export function RunsPage(): JSX.Element {
     setTaskTypeFilter(taskTypeFilterFromQuery);
   }, [taskTypeFilterFromQuery]);
 
-  const updateQueryFilters = (nextStatus: string, nextTaskType: string, replace = false): void => {
+  useEffect(() => {
+    setSelectedTaskId(selectedTaskIdFromQuery);
+  }, [selectedTaskIdFromQuery]);
+
+  const updateQueryFilters = (nextStatus: string, nextTaskType: string, replace = false, nextTaskId = selectedTaskId): void => {
     const next = new URLSearchParams();
     if (nextStatus !== "all") next.set("status", nextStatus);
     if (nextTaskType.trim()) next.set("task_type", nextTaskType.trim());
+    if (nextTaskId) next.set("task_id", nextTaskId);
     setSearchParams(next, { replace });
+  };
+
+  const selectTask = (nextTaskId: string | null, replace = false): void => {
+    setSelectedTaskId(nextTaskId);
+    updateQueryFilters(statusFilter, taskTypeFilter, replace, nextTaskId);
   };
 
   const tasksQuery = useTasks(120);
@@ -437,7 +938,7 @@ export function RunsPage(): JSX.Element {
                   placeholder="Filter by task type"
                 />
                 <div className="text-xs text-muted-foreground">Rows: {filteredTasks.length}</div>
-                <Button size="sm" variant="outline" onClick={() => setSelectedTaskId(null)}>Clear Selection</Button>
+                <Button size="sm" variant="outline" onClick={() => selectTask(null)}>Clear Selection</Button>
               </div>
             </CardContent>
           </Card>
@@ -473,7 +974,7 @@ export function RunsPage(): JSX.Element {
                     <TableRow
                       key={task.id}
                       className={isSelected ? "cursor-pointer bg-primary/10" : "cursor-pointer"}
-                      onClick={() => setSelectedTaskId(task.id)}
+                      onClick={() => selectTask(task.id)}
                     >
                       <TableCell>
                         <div className="space-y-0.5">
@@ -507,7 +1008,7 @@ export function RunsPage(): JSX.Element {
         <DetailsSurface
           title="Run Details"
           open={Boolean(selectedTaskId)}
-          onClose={() => setSelectedTaskId(null)}
+          onClose={() => selectTask(null)}
           empty={
             <EmptyState
               title="No run selected"
@@ -565,9 +1066,9 @@ export function RunsPage(): JSX.Element {
                         <div className="mt-1">{timestampLabel(selectedTask.updated_at)}</div>
                       </div>
                     </div>
-                    {selectedTask.error ? (
+                    {describeDiagnostics(selectedTask) ? (
                       <div className="rounded border border-destructive/35 bg-destructive/10 p-2 text-destructive">
-                        {selectedTask.error}
+                        {describeDiagnostics(selectedTask)}
                       </div>
                     ) : null}
                   </div>
@@ -646,7 +1147,7 @@ export function RunsPage(): JSX.Element {
 
               <section>
                 <SectionHeader title="Result Preview" subtitle="Task-type-aware preview for operator scanability. Raw payload remains available below." />
-                <ResultPreview taskType={selectedTask?.task_type} resultPayload={selectedResultPayload} taskPayload={selectedTaskPayload} />
+                <ResultPreview taskType={selectedTask?.task_type} resultPayload={selectedResultPayload} taskPayload={selectedTaskPayload} taskId={selectedTask?.id || null} />
               </section>
 
               <section>

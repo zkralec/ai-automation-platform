@@ -110,4 +110,40 @@ describe("AlertsPage", () => {
     expect(screen.queryByText(/^Action Needed$/i, { selector: "h2" })).not.toBeInTheDocument();
     expect(screen.queryByText(/^Workflow Alerts$/i, { selector: "h2" })).not.toBeInTheDocument();
   });
+
+  it("surfaces jobs-specific source weakness and intentional notify skips with direct actions", () => {
+    telemetryEventsFixture = [
+      {
+        id: "evt-jobs-weak-source",
+        event_type: "task_failed",
+        source: "worker",
+        level: "WARNING",
+        message: "jobs_collect_v1 source adapter timeout caused weak source coverage",
+        metadata_json: { task_type: "jobs_collect_v1", task_id: "task-jobs-1", source_name: "indeed" },
+        created_at: "2026-03-11T12:00:00Z"
+      },
+      {
+        id: "evt-jobs-skip",
+        event_type: "jobs_digest_notify_decision",
+        source: "worker",
+        level: "INFO",
+        message: "notify skipped intentionally: skipped_empty_shortlist",
+        metadata_json: { task_type: "jobs_digest_v2", task_id: "task-jobs-2", reason: "skipped_empty_shortlist" },
+        created_at: "2026-03-11T12:05:00Z"
+      }
+    ];
+    tasksFixture = [];
+
+    render(
+      <MemoryRouter>
+        <AlertsPage />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText(/Jobs source coverage weak: indeed/i)).toBeInTheDocument();
+    expect(screen.getByText(/Jobs notify skipped intentionally/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Inspect Source Coverage/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Inspect Digest Artifact/i })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /Inspect Latest Run/i }).length).toBeGreaterThan(0);
+  });
 });

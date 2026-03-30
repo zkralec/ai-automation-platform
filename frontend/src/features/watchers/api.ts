@@ -38,6 +38,7 @@ export type Watcher = {
   updated_at: string;
   last_run_summary?: WatcherRunSummary | null;
   last_outcome_summary?: WatcherOutcomeSummary | null;
+  workflow_summary?: Record<string, unknown> | null;
 };
 
 export type WatcherCreateInput = {

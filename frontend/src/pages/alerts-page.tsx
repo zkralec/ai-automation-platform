@@ -27,6 +27,9 @@ type AlertSignal = FeedEvent & {
 
 const FAILING_TASK_STATUSES = new Set(["failed", "failed_permanent", "blocked_budget"]);
 const TASK_TYPE_PATTERN = /([a-z0-9]+(?:_[a-z0-9]+)+_v\d+)/i;
+const JOBS_WATCHER_ROUTE = "/workflows?watcher=preset-jobs-digest-scan";
+const JOBS_SOURCE_COVERAGE_ROUTE = "/runs?task_type=jobs_collect_v1";
+const JOBS_DIGEST_ROUTE = "/runs?task_type=jobs_digest_v2";
 
 const PRIMARY_WORKFLOW_ROUTE_BY_TASK_TYPE: Record<string, string> = {
   deals_scan_v1: "/workflows?watcher=preset-rtx5090-deals-scan",
@@ -133,6 +136,49 @@ function inferWorkflowRoute(taskTypeHint: string | null, eventType: string, mess
   return null;
 }
 
+function isJobsTaskType(taskTypeHint: string | null | undefined): boolean {
+  return Boolean(taskTypeHint && taskTypeHint.startsWith("jobs_"));
+}
+
+function extractTaskIdHint(metadata: Record<string, unknown>): string | null {
+  const keys = ["task_id", "source_task_id", "parent_task_id", "latest_task_id"];
+  for (const key of keys) {
+    const value = asText(metadata[key]).trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+function extractJobsSourceHint(metadata: Record<string, unknown>): string {
+  const keys = ["job_source", "source_name", "weak_source", "adapter", "adapter_name", "source"];
+  for (const key of keys) {
+    const value = asText(metadata[key]).trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function isIntentionalJobsNotifySkip(message: string, metadata: Record<string, unknown>): boolean {
+  const reason = [
+    message,
+    asText(metadata.reason),
+    asText(metadata.notify_reason),
+    asText(metadata.skip_reason),
+    asText(metadata.notify_decision),
+    asText(metadata.should_notify)
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return (
+    reason.includes("notify skipped") ||
+    reason.includes("skipped_empty_shortlist") ||
+    reason.includes("empty shortlist") ||
+    reason.includes("should_notify false") ||
+    reason.includes("intentional skip")
+  );
+}
+
 function inferAgentHint(message: string, metadata: Record<string, unknown>, source: string): string {
   const metadataAgent =
     asText(metadata.agent_name) ||
@@ -218,10 +264,14 @@ function inferNextAction(eventType: string, message: string, family: string): st
   return undefined;
 }
 
-function buildRunsRoute(taskTypeHint?: string | null): string {
+function buildRunsRoute(taskTypeHint?: string | null, taskId?: string | null, status = "failed"): string {
   const params = new URLSearchParams();
-  params.set("status", "failed");
-  if (taskTypeHint) params.set("task_type", taskTypeHint);
+  if (taskId) {
+    params.set("task_id", taskId);
+  } else {
+    if (status !== "all") params.set("status", status);
+    if (taskTypeHint) params.set("task_type", taskTypeHint);
+  }
   return `/runs?${params.toString()}`;
 }
 
@@ -238,9 +288,10 @@ function buildAlertActions(input: {
   category: AlertCategory;
   family: string;
   taskTypeHint?: string | null;
+  taskId?: string | null;
   workflowRoute?: string | null;
 }): FeedAction[] {
-  const { category, family, taskTypeHint, workflowRoute } = input;
+  const { category, family, taskTypeHint, taskId, workflowRoute } = input;
   const actions: FeedAction[] = [];
 
   const isSystem = category === "system" || family === "watchdog" || family === "stale-agent" || family === "stale";
@@ -255,7 +306,7 @@ function buildAlertActions(input: {
     family === "notify-failure" ||
     family === "budget";
   if (hasRunsIntent) {
-    actions.push({ label: "Open Matching Runs", to: buildRunsRoute(taskTypeHint), variant: "default" });
+    actions.push({ label: taskId ? "Inspect Latest Run" : "Open Matching Runs", to: buildRunsRoute(taskTypeHint, taskId), variant: "default" });
   }
 
   const workflowTarget = workflowRoute || (category === "workflow" || family === "notify-failure" ? "/workflows" : "");
@@ -264,6 +315,148 @@ function buildAlertActions(input: {
   }
 
   return dedupeActions(actions);
+}
+
+type JobsAlertDescriptor = {
+  title: string;
+  explanation: string;
+  nextAction: string;
+  family: string;
+  severity?: AlertSeverity;
+  category?: AlertCategory;
+  actions: FeedAction[];
+};
+
+function buildJobsAlertActions(taskTypeHint: string, taskId: string | null, includeSourceCoverage: boolean, includeDigest: boolean, intentionalSkip = false): FeedAction[] {
+  const actions: FeedAction[] = [
+    {
+      label: "Inspect Latest Run",
+      to: buildRunsRoute(taskTypeHint, taskId, intentionalSkip ? "all" : "failed"),
+      variant: "default"
+    },
+    { label: "Open Watcher Config", to: JOBS_WATCHER_ROUTE, variant: "outline" }
+  ];
+
+  if (includeSourceCoverage) {
+    actions.push({ label: "Inspect Source Coverage", to: JOBS_SOURCE_COVERAGE_ROUTE, variant: "secondary" });
+  }
+  if (includeDigest) {
+    actions.push({ label: "Inspect Digest Artifact", to: JOBS_DIGEST_ROUTE, variant: "secondary" });
+  }
+
+  return dedupeActions(actions);
+}
+
+function buildJobsAlertDescriptor(input: {
+  taskTypeHint: string;
+  message: string;
+  metadata: Record<string, unknown>;
+  taskId: string | null;
+  defaultSeverity: AlertSeverity;
+  defaultCategory: AlertCategory;
+}): JobsAlertDescriptor | null {
+  const { taskTypeHint, message, metadata, taskId, defaultSeverity, defaultCategory } = input;
+  if (!isJobsTaskType(taskTypeHint)) return null;
+
+  const text = `${taskTypeHint} ${message} ${asText(metadata.reason)} ${asText(metadata.summary)} ${asText(metadata.stage)}`.toLowerCase();
+  const sourceHint = extractJobsSourceHint(metadata);
+  const sourceLabel = sourceHint ? `: ${sourceHint}` : "";
+
+  if (taskTypeHint === "jobs_digest_v2" && isIntentionalJobsNotifySkip(message, metadata)) {
+    return {
+      title: "Jobs notify skipped intentionally",
+      explanation: "Digest completed without sending a notification because the shortlist was empty or notify policy said to skip.",
+      nextAction: "Inspect the latest digest run to confirm the skip reason, then open watcher config if you expected a send.",
+      family: "jobs-notify-skipped",
+      severity: "info",
+      category: "workflow",
+      actions: buildJobsAlertActions(taskTypeHint, taskId, false, true, true)
+    };
+  }
+
+  if ((taskTypeHint === "jobs_collect_v1" || taskTypeHint === "jobs_normalize_v1") && (text.includes("0 job") || text.includes("no result") || text.includes("empty result") || text.includes("empty set") || text.includes("no jobs"))) {
+    return {
+      title: taskTypeHint === "jobs_collect_v1" ? "Jobs collection returned no usable results" : "Jobs normalization collapsed to zero usable jobs",
+      explanation: taskTypeHint === "jobs_collect_v1"
+        ? "The jobs search ran but returned an empty or near-empty result set. This usually points to narrow query breadth or weak source coverage."
+        : "Raw jobs were collected, but normalization and cleanup left no usable records. Inspect dedupe impact and metadata quality by source.",
+      nextAction: "Inspect the latest run and source coverage, then widen titles, locations, or query count if the search scope is too narrow.",
+      family: "jobs-empty-results",
+      severity: defaultSeverity === "error" ? "error" : "warning",
+      category: defaultCategory,
+      actions: buildJobsAlertActions(taskTypeHint, taskId, true, false)
+    };
+  }
+
+  if ((taskTypeHint === "jobs_collect_v1" || taskTypeHint === "jobs_normalize_v1") && (text.includes("metadata") || text.includes("missing_company") || text.includes("missing_posted_at") || text.includes("missing_source_url") || text.includes("malformed"))) {
+    return {
+      title: "Jobs metadata quality degraded",
+      explanation: "Collected jobs are missing company, post date, direct links, or other key fields often enough to degrade downstream shortlist quality.",
+      nextAction: "Inspect source coverage and metadata gap rates, then focus on the weakest adapter or extraction path.",
+      family: "jobs-metadata-weak",
+      severity: "warning",
+      category: "workflow",
+      actions: buildJobsAlertActions(taskTypeHint, taskId, true, false)
+    };
+  }
+
+  if ((taskTypeHint === "jobs_collect_v1" || taskTypeHint === "jobs_normalize_v1") && (text.includes("source") || text.includes("adapter") || text.includes("timeout") || text.includes("rate limit"))) {
+    return {
+      title: `Jobs source coverage weak${sourceLabel}`,
+      explanation: "One source adapter is returning weak, partial, or failing coverage, which can quietly shrink discovery breadth before ranking starts.",
+      nextAction: "Inspect the latest run and source coverage to see which source underperformed and whether pagination, retries, or extraction need attention.",
+      family: "jobs-source-weak",
+      severity: defaultSeverity === "error" ? "error" : "warning",
+      category: defaultCategory,
+      actions: buildJobsAlertActions(taskTypeHint, taskId, true, false)
+    };
+  }
+
+  if (taskTypeHint === "jobs_rank_v1") {
+    return {
+      title: "Jobs ranking failed",
+      explanation: "The ranking stage could not score the normalized job set cleanly. This blocks shortlist quality even when search breadth looked healthy upstream.",
+      nextAction: "Inspect the latest rank run for LLM attempts, fallback status, and input job quality before retrying.",
+      family: "jobs-ranking-failure",
+      severity: defaultSeverity,
+      category: defaultCategory,
+      actions: buildJobsAlertActions(taskTypeHint, taskId, false, true)
+    };
+  }
+
+  if (taskTypeHint === "jobs_shortlist_v1") {
+    return {
+      title: "Jobs shortlist stage failed",
+      explanation: "The shortlist step could not turn ranked jobs into a stable top set. This is usually a scoring, history, or cooldown-policy problem rather than source discovery.",
+      nextAction: "Inspect the latest shortlist run, then review repeat/cooldown behavior and the ranked input quality.",
+      family: "jobs-shortlist-failure",
+      severity: defaultSeverity,
+      category: defaultCategory,
+      actions: buildJobsAlertActions(taskTypeHint, taskId, false, true)
+    };
+  }
+
+  if (taskTypeHint === "jobs_digest_v2") {
+    return {
+      title: "Jobs digest generation failed",
+      explanation: "Mission Control could not render the final jobs digest cleanly. Top-job selection may be ready, but the operator-facing summary or notification payload failed.",
+      nextAction: "Inspect the latest digest run for model attempts, fallback status, and digest artifact output before retrying notify.",
+      family: "jobs-digest-failure",
+      severity: defaultSeverity,
+      category: defaultCategory,
+      actions: buildJobsAlertActions(taskTypeHint, taskId, false, true)
+    };
+  }
+
+  return {
+    title: `${taskTypeHint.replace(/_/g, " ")} needs review`,
+    explanation: "A jobs pipeline stage raised a workflow alert. Inspect the latest run and stage-specific observability before adjusting watcher settings.",
+    nextAction: "Inspect the latest run, then open watcher config if you need to widen search breadth or adjust shortlist policy.",
+    family: "jobs-workflow-alert",
+    severity: defaultSeverity,
+    category: defaultCategory,
+    actions: buildJobsAlertActions(taskTypeHint, taskId, taskTypeHint === "jobs_collect_v1" || taskTypeHint === "jobs_normalize_v1", taskTypeHint !== "jobs_collect_v1")
+  };
 }
 
 function buildEventSignature(input: {
@@ -312,30 +505,45 @@ function buildEventSignals(events: EventOut[]): AlertSignal[] {
   return events.map((event, index) => {
     const metadata = parseMetadataRecord(event.metadata_json);
     const taskTypeHint = inferTaskTypeHint(event.event_type, event.message || "", metadata);
+    const taskId = extractTaskIdHint(metadata);
     const severity = inferSeverity(event);
     const category = inferCategory(event, severity);
     const family = classifyFamily(event.event_type, event.message, taskTypeHint);
     const workflowRoute = inferWorkflowRoute(taskTypeHint, event.event_type, event.message || "");
     const createdAtMs = parseTimestampMs(event.created_at);
+    const jobsDescriptor =
+      taskTypeHint && isJobsTaskType(taskTypeHint)
+        ? buildJobsAlertDescriptor({
+            taskTypeHint,
+            message: event.message || "",
+            metadata,
+            taskId,
+            defaultSeverity: severity,
+            defaultCategory: category
+          })
+        : null;
+    const finalSeverity = jobsDescriptor?.severity || severity;
+    const finalCategory = jobsDescriptor?.category || category;
+    const finalFamily = jobsDescriptor?.family || family;
 
     const signal: AlertSignal = {
       id: event.id || `${event.event_type}-${event.created_at}-${index}`,
-      title: humanizeEventType(event.event_type),
-      explanation: summarizeText(event.message || ""),
+      title: jobsDescriptor?.title || humanizeEventType(event.event_type),
+      explanation: jobsDescriptor?.explanation || summarizeText(event.message || ""),
       source: event.source,
-      level: severity,
+      level: finalSeverity,
       createdAt: event.created_at,
-      nextAction: inferNextAction(event.event_type, event.message || "", family),
-      category,
-      severity,
-      signature: buildEventSignature({ event, metadata, family, taskTypeHint }),
+      nextAction: jobsDescriptor?.nextAction || inferNextAction(event.event_type, event.message || "", family),
+      category: finalCategory,
+      severity: finalSeverity,
+      signature: buildEventSignature({ event, metadata, family: finalFamily, taskTypeHint }),
       priority: 0,
       createdAtMs,
-      family,
+      family: finalFamily,
       count: 1,
       taskTypeHint,
       workflowRoute,
-      actions: buildAlertActions({ category, family, taskTypeHint, workflowRoute })
+      actions: jobsDescriptor?.actions || buildAlertActions({ category: finalCategory, family: finalFamily, taskTypeHint, taskId, workflowRoute })
     };
 
     signal.priority = scoreSignal(signal);
@@ -352,31 +560,44 @@ function buildTaskSignals(tasks: TaskOut[]): AlertSignal[] {
       const createdAtMs = parseTimestampMs(task.updated_at);
       const family = task.task_type === "notify_v1" ? "notify-failure" : "task-failure";
       const workflowRoute = PRIMARY_WORKFLOW_ROUTE_BY_TASK_TYPE[task.task_type] || (family === "notify-failure" ? "/workflows" : null);
+      const jobsDescriptor = buildJobsAlertDescriptor({
+        taskTypeHint: task.task_type,
+        message: task.diagnostics?.summary || task.error || "",
+        metadata: {},
+        taskId: task.id,
+        defaultSeverity: severity,
+        defaultCategory: category
+      });
+      const finalSeverity = jobsDescriptor?.severity || severity;
+      const finalCategory = jobsDescriptor?.category || category;
+      const finalFamily = jobsDescriptor?.family || family;
 
       const signal: AlertSignal = {
         id: `task-${task.id}`,
-        title: `${task.task_type} ${task.status.replace(/_/g, " ")}`,
-        explanation: summarizeText(task.error || "Task requires operator review."),
+        title: jobsDescriptor?.title || `${task.task_type} ${task.status.replace(/_/g, " ")}`,
+        explanation: jobsDescriptor?.explanation || summarizeText(task.diagnostics?.summary || task.error || "Task requires operator review."),
         source: "task-runner",
-        level: severity,
+        level: finalSeverity,
         createdAt: task.updated_at,
-        nextAction:
+        nextAction: jobsDescriptor?.nextAction ||
+          (
           family === "notify-failure"
             ? "Open workflow config, verify channel/dedupe settings, then retry failed notification runs."
-            : "Open matching runs and inspect attempts plus result artifacts.",
-        category,
-        severity,
+            : "Open matching runs and inspect attempts plus result artifacts."
+          ),
+        category: finalCategory,
+        severity: finalSeverity,
         signature:
-          family === "notify-failure"
+          finalFamily === "notify-failure"
             ? `task:notify-failure:${task.status}`
-            : `task:${task.task_type}:${task.status}:${normalizeForSignature(task.error || "")}`,
+            : `task:${task.task_type}:${task.status}:${normalizeForSignature(task.diagnostics?.summary || task.error || "")}`,
         priority: 0,
         createdAtMs,
-        family,
+        family: finalFamily,
         count: 1,
         taskTypeHint: task.task_type,
         workflowRoute,
-        actions: buildAlertActions({ category, family, taskTypeHint: task.task_type, workflowRoute })
+        actions: jobsDescriptor?.actions || buildAlertActions({ category: finalCategory, family: finalFamily, taskTypeHint: task.task_type, taskId: task.id, workflowRoute })
       };
       signal.priority = scoreSignal(signal);
       return signal;
