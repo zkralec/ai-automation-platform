@@ -1,0 +1,60 @@
+{
+  "request": {
+    "recorded_at": "2026-04-01T16:14:50Z",
+    "action": "apply_draft",
+    "stop_before_submit": true,
+    "application_target": {
+      "job_id": "norm-000163",
+      "title": "Software Engineer Intern (Spring/Summer 2026)",
+      "company": "Cohere",
+      "source": "linkedin",
+      "application_url": "https://www.linkedin.com/jobs/view/software-engineer-intern-spring-summer-2026-at-cohere-4359019903?position=3&pageNum=2&refId=YgLGSrjzzzXSBAKSv%2B0IcQ%3D%3D&trackingId=PCgyQv5hQrIIgWZdcR5l3g%3D%3D",
+      "application_host": "www.linkedin.com"
+    },
+    "resume_variant": {
+      "resume_variant_name": "Tailored Resume - Cohere",
+      "resume_file_name": "tailored_resume_-_cohere.txt",
+      "resume_upload_path": "/home/zkralec/VSCode/mission-control/data/openclaw_apply_drafts/resume_uploads/jobapply-ui-bb199170-114b-4822-a88a-5db5c9e3629d-63d70f9e-8124-458c-ae77-73c4a88596ec-896c8ec2-2b3e-4176-b9e2-64e3fbcc4a1b-norm-000163-cohere-software-engineer-intern-spring-summer-2026.txt",
+      "resume_text_present": true
+    },
+    "answer_count": 3,
+    "cover_letter_present": true,
+    "capture_screenshots": true,
+    "max_screenshots": 8,
+    "inspect_only": false,
+    "browser": {
+      "run_on_host": true,
+      "attach_mode": false,
+      "skip_browser_start": false,
+      "allow_browser_start": true,
+      "gateway_url": "ws://127.0.0.1:18789",
+      "cdp_url": "http://127.0.0.1:18800",
+      "host_gateway_alias": null
+    },
+    "profile_mode": "resume_profile",
+    "lineage": {
+      "pipeline_id": "jobapply-ui-bb199170-114b-4822-a88a-5db5c9e3629d",
+      "task_id": "63d70f9e-8124-458c-ae77-73c4a88596ec",
+      "run_id": "896c8ec2-2b3e-4176-b9e2-64e3fbcc4a1b"
+    }
+  },
+  "result_summary": {
+    "recorded_at": "2026-04-01T16:15:22Z",
+    "draft_status": "not_started",
+    "source_status": "login_required",
+    "awaiting_review": false,
+    "review_status": "blocked",
+    "submitted": false,
+    "failure_category": "login_required",
+    "blocking_reason": "The application flow requires a logged-in session that is not currently available.",
+    "fields_filled_count": 0,
+    "screenshots_count": 1,
+    "checkpoint_urls": [
+      "https://www.linkedin.com/jobs/view/software-engineer-intern-spring-summer-2026-at-cohere-4359019903?position=3&pageNum=2&refId=YgLGSrjzzzXSBAKSv%2B0IcQ%3D%3D&trackingId=PCgyQv5hQrIIgWZdcR5l3g%3D%3D"
+    ],
+    "warnings": [
+      "configured_resume_upload_path_missing"
+    ],
+    "errors": []
+  }
+}

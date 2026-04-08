@@ -1,0 +1,62 @@
+{
+  "request": {
+    "recorded_at": "2026-04-01T15:40:16Z",
+    "action": "apply_draft",
+    "stop_before_submit": true,
+    "application_target": {
+      "job_id": "norm-000063",
+      "title": "Software Engineer I (New Grad) - Consumer Experience",
+      "company": "StubHub",
+      "source": "linkedin",
+      "application_url": "https://www.linkedin.com/jobs/view/software-engineer-i-new-grad-consumer-experience-at-stubhub-4392033766?position=3&pageNum=2&refId=0459FUY7PwQ0PLryt%2FwxxA%3D%3D&trackingId=RgNa10jlnb7ugM32cQ8SMw%3D%3D",
+      "application_host": "www.linkedin.com"
+    },
+    "resume_variant": {
+      "resume_variant_name": "Tailored Resume - StubHub",
+      "resume_file_name": "tailored_resume_-_stubhub.txt",
+      "resume_upload_path": "/home/zkralec/VSCode/mission-control/data/openclaw_apply_drafts/resume_uploads/jobapply-ui-63e03a18-b1b7-47ad-9120-72add2a20b4e-a1fc624a-8d9a-42f7-8ab2-85927a302c29-a0e0f5a6-0872-4c8d-90f0-53c5bb1a5e41-norm-000063-stubhub-software-engineer-i-new-grad-consumer-experience.txt",
+      "resume_text_present": true
+    },
+    "answer_count": 3,
+    "cover_letter_present": true,
+    "capture_screenshots": true,
+    "max_screenshots": 8,
+    "inspect_only": false,
+    "browser": {
+      "run_on_host": true,
+      "attach_mode": false,
+      "skip_browser_start": false,
+      "allow_browser_start": true,
+      "gateway_url": "ws://127.0.0.1:18789",
+      "cdp_url": "http://127.0.0.1:18800",
+      "host_gateway_alias": null
+    },
+    "profile_mode": "resume_profile",
+    "lineage": {
+      "pipeline_id": "jobapply-ui-63e03a18-b1b7-47ad-9120-72add2a20b4e",
+      "task_id": "a1fc624a-8d9a-42f7-8ab2-85927a302c29",
+      "run_id": "a0e0f5a6-0872-4c8d-90f0-53c5bb1a5e41"
+    }
+  },
+  "result_summary": {
+    "recorded_at": "2026-04-01T15:40:19Z",
+    "draft_status": "not_started",
+    "source_status": "command_failed",
+    "awaiting_review": false,
+    "review_status": "blocked",
+    "submitted": false,
+    "failure_category": "navigation_failed",
+    "blocking_reason": "OpenClaw command exited with code 1.",
+    "fields_filled_count": 0,
+    "screenshots_count": 0,
+    "checkpoint_urls": [
+      "https://www.linkedin.com/jobs/view/software-engineer-i-new-grad-consumer-experience-at-stubhub-4392033766?position=3&pageNum=2&refId=0459FUY7PwQ0PLryt%2FwxxA%3D%3D&trackingId=RgNa10jlnb7ugM32cQ8SMw%3D%3D"
+    ],
+    "warnings": [
+      "configured_resume_upload_path_missing"
+    ],
+    "errors": [
+      "openclaw_command_failed_exit_1"
+    ]
+  }
+}

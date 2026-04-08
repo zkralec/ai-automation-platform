@@ -1,0 +1,92 @@
+{
+  "action": "apply_draft",
+  "submit": false,
+  "stop_before_submit": true,
+  "application_target": {
+    "job_id": "norm-000234",
+    "title": "Senior Software Engineer",
+    "company": "Wells Fargo",
+    "location": "Hybrid Work IN Charlotte, NC",
+    "location_normalized": "hybrid work in charlotte nc",
+    "source": "indeed",
+    "source_url": "https://www.indeed.com/rc/clk?jk=438fdc5ed57d2861&bb=lsC0C-KA6bKR0vyL51UMPYNIConfObcNkpu-KDca0Q0bseF6w1rH38oe0_KGaRI6FbcGHAXQDhf9JI87KesPRjj1-lV4pEUklTvL526p4B_oe35lPR2Dd0CnpzV7RIay&xkcb=SoBG67M3lktNvjxM1p0AbzkdCdPP&fccid=78bbcd26e39621f5&vjs=3",
+    "application_url": "https://www.indeed.com/rc/clk?jk=438fdc5ed57d2861&bb=lsC0C-KA6bKR0vyL51UMPYNIConfObcNkpu-KDca0Q0bseF6w1rH38oe0_KGaRI6FbcGHAXQDhf9JI87KesPRjj1-lV4pEUklTvL526p4B_oe35lPR2Dd0CnpzV7RIay&xkcb=SoBG67M3lktNvjxM1p0AbzkdCdPP&fccid=78bbcd26e39621f5&vjs=3",
+    "work_mode": "hybrid",
+    "posted_at_normalized": null,
+    "posted_age_days": null,
+    "salary_text": "$100,000 - $196,000",
+    "salary_min": 100000.0,
+    "salary_max": 196000.0,
+    "description_snippet": "Senior Software Engineer Wells Fargo Hybrid work in Charlotte, NC $100,000 - $196,000 a year Tuition reimbursement Parental leave Health insurance Paid time off Adoption assistance</spa"
+  },
+  "resume_variant": {
+    "resume_variant_name": "Tailored Resume - Wells Fargo",
+    "resume_variant_text": "Tailored toward Senior Software Engineer at Wells Fargo. Focus areas: Demonstrated fit for the 'Senior Software Engineer' role scope., Comfort with hybrid collaboration expectations., Location alignment for Hybrid Work IN Charlotte, NC.\n\nSelected base resume profile:\n\nZachary Kralec \nzkralec@icloud.com \u2022 Development & Work Portfolio \nEDUCATION \nSt. Mary\u2019s College of Maryland | Saint Mary\u2019s City, MD \nBachelor of Science in Computer Science, Minor in Business | GPA: 3.54 \nAwards & Honors: Dean\u2019s List (4x: 2022-2025) \n \nTECHNICAL PROJECTS \nAI Automation Platform (Mission Control) | Python, FastAPI, Redis, OpenAI API, React, TypeScript \n- Built an AI driven automation platform that executes scheduled and on demand workflows using a FastAPI backend, Redis \ntask queues, and multiple distributed background workers. \n- Designed a modular task orchestration framework with retry policies, idempotent execution, execution logs, and structured \ntask contracts.  \n- Built cost aware AI routing with token usage tracking and retry control to enforce API budget limits while maintaining \npipeline reliability. \n- Developed a React and TypeScript command center dashboard for system observability, workflow control, AI usage \nanalytics, and task runs and history.  \n- Used multi-source web scraping pipelines and automated notifications via Discord for real time alerts on high value results. \n \nRELEVANT EXPERIENCE  \nResource Management Concepts Inc. | Lexington Park, MD \nCorporate IT Analyst: September 2025 - Present \n- Built a resumable PDQ inventory audit automation tool to help collect installed software and browser extensions across \n100+ endpoints, producing auditable CSV evidence and multiple security flag reports. \n- Did hands-on server and virtualization work by disassembling and modifying hardware, configuring systems, and \nsupporting lab environments in Proxmox. \n- Improved email security by tuning SpamTitan pattern matching with regex rules, helping to catch more targeted spam and \nmalicious emails before they reached targeted employees. \n- Built and supported tooling and automation in order to resolve user access, identity, and system issues. \n \nResource Management Concepts Inc. | Lexington Park, MD \nInformation Technology Intern June 2025 - August 2025 \n- Learned and applied PowerShell scripts to help automate user account management and many routine system tasks. \n- Ran recurring system health checks and fixed over 10 technical issues to keep Windows servers and employee \nworkstations/devices stable. \n- Worked with a small clustered server environment of 3 interconnected servers, running Proxmox and Linux, helping \nimprove virtualization, OS deployment, and day to day resource management workflows. \n \nLTN Global Communications Inc. | Columbia, MD \nQA Development Intern: May 2024 - August 2024 \n- Automated CLI based video test runs and wrapped them within Python scripts, cutting test time by ~50% while making the \noutput easier to follow along. \n- Helped maintain GitLab CI/CD pipelines and worked though deployment issues when they arose, fixing over 5 issues. \n- Found and patched performance weak spots within video encoders and decoders so that client facing outputs remained fast, \nstable, and secure at all times. \n- Logged and organized over 50 test cases and issues in TestRail, keeping QA work followable and more aligned with \nDevOps workflows. \n- Tested over 15 encoders and decoders for security flaws (latency, data leaks) to reduce risks in broadcast infrastructure. \n  \nSKILLS \n- Programming: Python, Java, C/C++, JavaScript, SQL, Swift, Bash \n- Frameworks: React, Node.js, Express, Flask, TensorFlow, scikit-learn, Pandas, NumPy \n- Dev/AI: OpenAI API, REST APIs, LLMs, Prompt Engineering, Context Management, GitHub, VSCode, Xcode, Docker \n- Cloud: AWS, Azure, Firebase \n- Ops/Sec: PowerShell Automation, Freshservice, PDQ, Duo, Proxmox, Linux, SpamTitan \n- Focus Areas: Applied AI, Generative AI, Full-Stack, Cloud Engineering, Security Automation",
+    "resume_upload_path": "/app/data/openclaw_apply_drafts/resume_uploads/jobapply-ui-7264d6b4-39c1-458a-bd85-78d81725664c-ab7fcbda-71a5-4c07-a53c-8ae7d1cc2aba-ba5e42f4-aff3-4e89-a2ef-45ddbca9424b-norm-000234-wells-fargo-senior-software-engineer.txt",
+    "resume_file_name": "tailored_resume_-_wells_fargo.txt"
+  },
+  "application_answers": [
+    {
+      "question": "Why are you interested in the Senior Software Engineer role at Wells Fargo?",
+      "answer": "I\u2019m interested in Senior Software Engineer at Wells Fargo because it aligns with my background and the work described in the job posting.",
+      "answer_type": "motivation"
+    },
+    {
+      "question": "What relevant experience makes you a strong fit for Senior Software Engineer?",
+      "answer": "My background includes relevant experience connected to Senior Software Engineer, and I would review the tailored resume draft before submission.",
+      "answer_type": "experience"
+    },
+    {
+      "question": "Describe a project or accomplishment that matches the role requirements.",
+      "answer": "I would refine this example with a concrete, truthful project from my resume before submitting.",
+      "answer_type": "impact"
+    }
+  ],
+  "cover_letter_text": "Dear Hiring Team,\n\nI am excited to apply for the Senior Software Engineer role at Wells Fargo. My background aligns with the role\u2019s requirements, and I would tailor this letter further during review.\n\nSincerely,\nCandidate",
+  "capture_screenshots": true,
+  "max_screenshots": 8,
+  "profile_mode": "resume_profile",
+  "constraints": {
+    "stop_before_submit": true,
+    "submit": false,
+    "headless": true,
+    "timeout_seconds": 240,
+    "max_steps": 25,
+    "allow_account_creation": false,
+    "inspect_only": false,
+    "skip_field_fills": false,
+    "skip_resume_upload": false
+  },
+  "auth": {
+    "session_available": false,
+    "strategy": null,
+    "storage_state_path": null,
+    "browser_profile_path": null
+  },
+  "browser": {
+    "run_on_host": true,
+    "attach_mode": true,
+    "skip_browser_start": true,
+    "allow_browser_start": false,
+    "gateway_url": "ws://127.0.0.1:18789",
+    "cdp_url": "http://127.0.0.1:18800",
+    "host_gateway_alias": "host.docker.internal"
+  },
+  "artifacts": {
+    "run_key": "jobapply-ui-7264d6b4-39c1-458a-bd85-78d81725664c-ab7fcbda-71a5-4c07-a53c-8ae7d1cc2aba-ba5e42f4-aff3-4e89-a2ef-45ddbca9424b-norm-000234-wells-fargo-senior-software-engineer",
+    "receipt_path": "/data/openclaw_apply_drafts/receipts/jobapply-ui-7264d6b4-39c1-458a-bd85-78d81725664c-ab7fcbda-71a5-4c07-a53c-8ae7d1cc2aba-ba5e42f4-aff3-4e89-a2ef-45ddbca9424b-norm-000234-wells-fargo-senior-software-engineer.json",
+    "screenshot_dir": "/app/data/openclaw_apply_drafts/screenshots/jobapply-ui-7264d6b4-39c1-458a-bd85-78d81725664c-ab7fcbda-71a5-4c07-a53c-8ae7d1cc2aba-ba5e42f4-aff3-4e89-a2ef-45ddbca9424b-norm-000234-wells-fargo-senior-software-engineer",
+    "resume_upload_path": "/app/data/openclaw_apply_drafts/resume_uploads/jobapply-ui-7264d6b4-39c1-458a-bd85-78d81725664c-ab7fcbda-71a5-4c07-a53c-8ae7d1cc2aba-ba5e42f4-aff3-4e89-a2ef-45ddbca9424b-norm-000234-wells-fargo-senior-software-engineer.txt"
+  },
+  "lineage": {
+    "pipeline_id": "jobapply-ui-7264d6b4-39c1-458a-bd85-78d81725664c",
+    "task_id": "ab7fcbda-71a5-4c07-a53c-8ae7d1cc2aba",
+    "run_id": "ba5e42f4-aff3-4e89-a2ef-45ddbca9424b",
+    "upstream": {
+      "task_id": "d0540fc1-fd20-49c5-9204-9db475747fd8",
+      "run_id": "8b04c623-ef80-4ff6-8d14-f1d2747c484e",
+      "task_type": "resume_tailor_v1"
+    }
+  },
+  "inspect_only": false
+}

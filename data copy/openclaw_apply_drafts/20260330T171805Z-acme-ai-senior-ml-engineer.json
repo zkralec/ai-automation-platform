@@ -1,0 +1,25 @@
+{
+  "recorded_at": "2026-03-30T17:18:05Z",
+  "action": "apply_draft",
+  "submit": false,
+  "stop_before_submit": true,
+  "application_target": {
+    "job_id": null,
+    "title": "Senior ML Engineer",
+    "company": "Acme AI",
+    "source": null,
+    "application_url": "https://example.com/apply",
+    "source_url": null
+  },
+  "resume_variant": {
+    "resume_variant_name": "Tailored Resume",
+    "resume_file_name": "tailored_resume.txt",
+    "resume_upload_path": null
+  },
+  "application_answers_count": 0,
+  "cover_letter_included": false,
+  "capture_screenshots": true,
+  "max_screenshots": 4,
+  "create_account_if_needed": false,
+  "profile_mode": null
+}

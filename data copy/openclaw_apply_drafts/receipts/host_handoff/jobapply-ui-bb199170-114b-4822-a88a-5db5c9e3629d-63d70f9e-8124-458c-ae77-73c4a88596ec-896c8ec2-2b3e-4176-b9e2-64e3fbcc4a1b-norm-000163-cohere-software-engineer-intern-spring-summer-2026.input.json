@@ -1,0 +1,92 @@
+{
+  "action": "apply_draft",
+  "submit": false,
+  "stop_before_submit": true,
+  "application_target": {
+    "job_id": "norm-000163",
+    "title": "Software Engineer Intern (Spring/Summer 2026)",
+    "company": "Cohere",
+    "location": "San Francisco, CA",
+    "location_normalized": "san francisco ca ca",
+    "source": "linkedin",
+    "source_url": "https://www.linkedin.com/jobs/view/software-engineer-intern-spring-summer-2026-at-cohere-4359019903?position=3&pageNum=2&refId=YgLGSrjzzzXSBAKSv%2B0IcQ%3D%3D&trackingId=PCgyQv5hQrIIgWZdcR5l3g%3D%3D",
+    "application_url": "https://www.linkedin.com/jobs/view/software-engineer-intern-spring-summer-2026-at-cohere-4359019903?position=3&pageNum=2&refId=YgLGSrjzzzXSBAKSv%2B0IcQ%3D%3D&trackingId=PCgyQv5hQrIIgWZdcR5l3g%3D%3D",
+    "work_mode": null,
+    "posted_at_normalized": "2025-12-11T00:00:00Z",
+    "posted_age_days": 111,
+    "salary_text": null,
+    "salary_min": null,
+    "salary_max": null,
+    "description_snippet": "Austin, TX 3 months ago Software Engineer Intern (Spring/Summer 2026) Software Engineer Intern (Spring/Summer 2026) Cohere San Francisco, CA Actively Hiring 1 week ago </di"
+  },
+  "resume_variant": {
+    "resume_variant_name": "Tailored Resume - Cohere",
+    "resume_variant_text": "Tailored toward Software Engineer Intern (Spring/Summer 2026) at Cohere. Focus areas: Demonstrated fit for the 'Software Engineer Intern (Spring/Summer 2026)' role scope., Location alignment for San Francisco, CA.\n\nSelected base resume profile:\n\nZachary Kralec \nzkralec@icloud.com \u2022 Development & Work Portfolio \nEDUCATION \nSt. Mary\u2019s College of Maryland | Saint Mary\u2019s City, MD \nBachelor of Science in Computer Science, Minor in Business | GPA: 3.54 \nAwards & Honors: Dean\u2019s List (4x: 2022-2025) \n \nTECHNICAL PROJECTS \nAI Automation Platform (Mission Control) | Python, FastAPI, Redis, OpenAI API, React, TypeScript \n- Built an AI driven automation platform that executes scheduled and on demand workflows using a FastAPI backend, Redis \ntask queues, and multiple distributed background workers. \n- Designed a modular task orchestration framework with retry policies, idempotent execution, execution logs, and structured \ntask contracts.  \n- Built cost aware AI routing with token usage tracking and retry control to enforce API budget limits while maintaining \npipeline reliability. \n- Developed a React and TypeScript command center dashboard for system observability, workflow control, AI usage \nanalytics, and task runs and history.  \n- Used multi-source web scraping pipelines and automated notifications via Discord for real time alerts on high value results. \n \nRELEVANT EXPERIENCE  \nResource Management Concepts Inc. | Lexington Park, MD \nCorporate IT Analyst: September 2025 - Present \n- Built a resumable PDQ inventory audit automation tool to help collect installed software and browser extensions across \n100+ endpoints, producing auditable CSV evidence and multiple security flag reports. \n- Did hands-on server and virtualization work by disassembling and modifying hardware, configuring systems, and \nsupporting lab environments in Proxmox. \n- Improved email security by tuning SpamTitan pattern matching with regex rules, helping to catch more targeted spam and \nmalicious emails before they reached targeted employees. \n- Built and supported tooling and automation in order to resolve user access, identity, and system issues. \n \nResource Management Concepts Inc. | Lexington Park, MD \nInformation Technology Intern June 2025 - August 2025 \n- Learned and applied PowerShell scripts to help automate user account management and many routine system tasks. \n- Ran recurring system health checks and fixed over 10 technical issues to keep Windows servers and employee \nworkstations/devices stable. \n- Worked with a small clustered server environment of 3 interconnected servers, running Proxmox and Linux, helping \nimprove virtualization, OS deployment, and day to day resource management workflows. \n \nLTN Global Communications Inc. | Columbia, MD \nQA Development Intern: May 2024 - August 2024 \n- Automated CLI based video test runs and wrapped them within Python scripts, cutting test time by ~50% while making the \noutput easier to follow along. \n- Helped maintain GitLab CI/CD pipelines and worked though deployment issues when they arose, fixing over 5 issues. \n- Found and patched performance weak spots within video encoders and decoders so that client facing outputs remained fast, \nstable, and secure at all times. \n- Logged and organized over 50 test cases and issues in TestRail, keeping QA work followable and more aligned with \nDevOps workflows. \n- Tested over 15 encoders and decoders for security flaws (latency, data leaks) to reduce risks in broadcast infrastructure. \n  \nSKILLS \n- Programming: Python, Java, C/C++, JavaScript, SQL, Swift, Bash \n- Frameworks: React, Node.js, Express, Flask, TensorFlow, scikit-learn, Pandas, NumPy \n- Dev/AI: OpenAI API, REST APIs, LLMs, Prompt Engineering, Context Management, GitHub, VSCode, Xcode, Docker \n- Cloud: AWS, Azure, Firebase \n- Ops/Sec: PowerShell Automation, Freshservice, PDQ, Duo, Proxmox, Linux, SpamTitan \n- Focus Areas: Applied AI, Generative AI, Full-Stack, Cloud Engineering, Security Automation",
+    "resume_upload_path": "/app/data/openclaw_apply_drafts/resume_uploads/jobapply-ui-bb199170-114b-4822-a88a-5db5c9e3629d-63d70f9e-8124-458c-ae77-73c4a88596ec-896c8ec2-2b3e-4176-b9e2-64e3fbcc4a1b-norm-000163-cohere-software-engineer-intern-spring-summer-2026.txt",
+    "resume_file_name": "tailored_resume_-_cohere.txt"
+  },
+  "application_answers": [
+    {
+      "question": "Why are you interested in the Software Engineer Intern (Spring/Summer 2026) role at Cohere?",
+      "answer": "I\u2019m interested in Software Engineer Intern (Spring/Summer 2026) at Cohere because it aligns with my background and the work described in the job posting.",
+      "answer_type": "motivation"
+    },
+    {
+      "question": "What relevant experience makes you a strong fit for Software Engineer Intern (Spring/Summer 2026)?",
+      "answer": "My background includes relevant experience connected to Software Engineer Intern (Spring/Summer 2026), and I would review the tailored resume draft before submission.",
+      "answer_type": "experience"
+    },
+    {
+      "question": "Describe a project or accomplishment that matches the role requirements.",
+      "answer": "I would refine this example with a concrete, truthful project from my resume before submitting.",
+      "answer_type": "impact"
+    }
+  ],
+  "cover_letter_text": "Dear Hiring Team,\n\nI am excited to apply for the Software Engineer Intern (Spring/Summer 2026) role at Cohere. My background aligns with the role\u2019s requirements, and I would tailor this letter further during review.\n\nSincerely,\nCandidate",
+  "capture_screenshots": true,
+  "max_screenshots": 8,
+  "profile_mode": "resume_profile",
+  "constraints": {
+    "stop_before_submit": true,
+    "submit": false,
+    "headless": true,
+    "timeout_seconds": 240,
+    "max_steps": 25,
+    "allow_account_creation": false,
+    "inspect_only": false,
+    "skip_field_fills": false,
+    "skip_resume_upload": false
+  },
+  "auth": {
+    "session_available": false,
+    "strategy": null,
+    "storage_state_path": null,
+    "browser_profile_path": null
+  },
+  "browser": {
+    "run_on_host": true,
+    "attach_mode": true,
+    "skip_browser_start": true,
+    "allow_browser_start": false,
+    "gateway_url": "ws://127.0.0.1:18789",
+    "cdp_url": "http://127.0.0.1:18800",
+    "host_gateway_alias": "host.docker.internal"
+  },
+  "artifacts": {
+    "run_key": "jobapply-ui-bb199170-114b-4822-a88a-5db5c9e3629d-63d70f9e-8124-458c-ae77-73c4a88596ec-896c8ec2-2b3e-4176-b9e2-64e3fbcc4a1b-norm-000163-cohere-software-engineer-intern-spring-summer-2026",
+    "receipt_path": "/data/openclaw_apply_drafts/receipts/jobapply-ui-bb199170-114b-4822-a88a-5db5c9e3629d-63d70f9e-8124-458c-ae77-73c4a88596ec-896c8ec2-2b3e-4176-b9e2-64e3fbcc4a1b-norm-000163-cohere-software-engineer-intern-spring-summer-2026.json",
+    "screenshot_dir": "/app/data/openclaw_apply_drafts/screenshots/jobapply-ui-bb199170-114b-4822-a88a-5db5c9e3629d-63d70f9e-8124-458c-ae77-73c4a88596ec-896c8ec2-2b3e-4176-b9e2-64e3fbcc4a1b-norm-000163-cohere-software-engineer-intern-spring-summer-2026",
+    "resume_upload_path": "/app/data/openclaw_apply_drafts/resume_uploads/jobapply-ui-bb199170-114b-4822-a88a-5db5c9e3629d-63d70f9e-8124-458c-ae77-73c4a88596ec-896c8ec2-2b3e-4176-b9e2-64e3fbcc4a1b-norm-000163-cohere-software-engineer-intern-spring-summer-2026.txt"
+  },
+  "lineage": {
+    "pipeline_id": "jobapply-ui-bb199170-114b-4822-a88a-5db5c9e3629d",
+    "task_id": "63d70f9e-8124-458c-ae77-73c4a88596ec",
+    "run_id": "896c8ec2-2b3e-4176-b9e2-64e3fbcc4a1b",
+    "upstream": {
+      "task_id": "7bad17fb-4503-4863-86f9-4419c3925df9",
+      "run_id": "b3346edb-6ed0-4568-aef0-dbc8cc6cb3ec",
+      "task_type": "resume_tailor_v1"
+    }
+  },
+  "inspect_only": false
+}

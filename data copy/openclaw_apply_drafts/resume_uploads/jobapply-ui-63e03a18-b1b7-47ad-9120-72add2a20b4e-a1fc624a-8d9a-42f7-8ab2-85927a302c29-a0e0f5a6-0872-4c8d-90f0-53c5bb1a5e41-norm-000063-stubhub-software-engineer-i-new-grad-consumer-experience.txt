@@ -1,0 +1,60 @@
+Tailored toward Software Engineer I (New Grad) - Consumer Experience at StubHub. Focus areas: ancisco Bay Area 2 weeks ago Software Engineer I (New Grad) - Consumer Experience Software Engineer I (New Grad) - Consumer Experience StubHub New York, NY Actively Hiring 4 days ago <!, Software Engineer I (New Grad) - Consumer Experience
+
+Selected base resume profile:
+
+Zachary Kralec 
+zkralec@icloud.com • Development & Work Portfolio 
+EDUCATION 
+St. Mary’s College of Maryland | Saint Mary’s City, MD 
+Bachelor of Science in Computer Science, Minor in Business | GPA: 3.54 
+Awards & Honors: Dean’s List (4x: 2022-2025) 
+ 
+TECHNICAL PROJECTS 
+AI Automation Platform (Mission Control) | Python, FastAPI, Redis, OpenAI API, React, TypeScript 
+- Built an AI driven automation platform that executes scheduled and on demand workflows using a FastAPI backend, Redis 
+task queues, and multiple distributed background workers. 
+- Designed a modular task orchestration framework with retry policies, idempotent execution, execution logs, and structured 
+task contracts.  
+- Built cost aware AI routing with token usage tracking and retry control to enforce API budget limits while maintaining 
+pipeline reliability. 
+- Developed a React and TypeScript command center dashboard for system observability, workflow control, AI usage 
+analytics, and task runs and history.  
+- Used multi-source web scraping pipelines and automated notifications via Discord for real time alerts on high value results. 
+ 
+RELEVANT EXPERIENCE  
+Resource Management Concepts Inc. | Lexington Park, MD 
+Corporate IT Analyst: September 2025 - Present 
+- Built a resumable PDQ inventory audit automation tool to help collect installed software and browser extensions across 
+100+ endpoints, producing auditable CSV evidence and multiple security flag reports. 
+- Did hands-on server and virtualization work by disassembling and modifying hardware, configuring systems, and 
+supporting lab environments in Proxmox. 
+- Improved email security by tuning SpamTitan pattern matching with regex rules, helping to catch more targeted spam and 
+malicious emails before they reached targeted employees. 
+- Built and supported tooling and automation in order to resolve user access, identity, and system issues. 
+ 
+Resource Management Concepts Inc. | Lexington Park, MD 
+Information Technology Intern June 2025 - August 2025 
+- Learned and applied PowerShell scripts to help automate user account management and many routine system tasks. 
+- Ran recurring system health checks and fixed over 10 technical issues to keep Windows servers and employee 
+workstations/devices stable. 
+- Worked with a small clustered server environment of 3 interconnected servers, running Proxmox and Linux, helping 
+improve virtualization, OS deployment, and day to day resource management workflows. 
+ 
+LTN Global Communications Inc. | Columbia, MD 
+QA Development Intern: May 2024 - August 2024 
+- Automated CLI based video test runs and wrapped them within Python scripts, cutting test time by ~50% while making the 
+output easier to follow along. 
+- Helped maintain GitLab CI/CD pipelines and worked though deployment issues when they arose, fixing over 5 issues. 
+- Found and patched performance weak spots within video encoders and decoders so that client facing outputs remained fast, 
+stable, and secure at all times. 
+- Logged and organized over 50 test cases and issues in TestRail, keeping QA work followable and more aligned with 
+DevOps workflows. 
+- Tested over 15 encoders and decoders for security flaws (latency, data leaks) to reduce risks in broadcast infrastructure. 
+  
+SKILLS 
+- Programming: Python, Java, C/C++, JavaScript, SQL, Swift, Bash 
+- Frameworks: React, Node.js, Express, Flask, TensorFlow, scikit-learn, Pandas, NumPy 
+- Dev/AI: OpenAI API, REST APIs, LLMs, Prompt Engineering, Context Management, GitHub, VSCode, Xcode, Docker 
+- Cloud: AWS, Azure, Firebase 
+- Ops/Sec: PowerShell Automation, Freshservice, PDQ, Duo, Proxmox, Linux, SpamTitan 
+- Focus Areas: Applied AI, Generative AI, Full-Stack, Cloud Engineering, Security Automation

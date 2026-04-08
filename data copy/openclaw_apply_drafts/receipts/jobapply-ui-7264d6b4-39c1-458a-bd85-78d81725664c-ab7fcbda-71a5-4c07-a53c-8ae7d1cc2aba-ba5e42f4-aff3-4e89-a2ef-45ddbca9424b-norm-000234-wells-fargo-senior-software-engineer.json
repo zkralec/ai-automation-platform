@@ -1,0 +1,62 @@
+{
+  "request": {
+    "recorded_at": "2026-04-01T15:33:21Z",
+    "action": "apply_draft",
+    "stop_before_submit": true,
+    "application_target": {
+      "job_id": "norm-000234",
+      "title": "Senior Software Engineer",
+      "company": "Wells Fargo",
+      "source": "indeed",
+      "application_url": "https://www.indeed.com/rc/clk?jk=438fdc5ed57d2861&bb=lsC0C-KA6bKR0vyL51UMPYNIConfObcNkpu-KDca0Q0bseF6w1rH38oe0_KGaRI6FbcGHAXQDhf9JI87KesPRjj1-lV4pEUklTvL526p4B_oe35lPR2Dd0CnpzV7RIay&xkcb=SoBG67M3lktNvjxM1p0AbzkdCdPP&fccid=78bbcd26e39621f5&vjs=3",
+      "application_host": "www.indeed.com"
+    },
+    "resume_variant": {
+      "resume_variant_name": "Tailored Resume - Wells Fargo",
+      "resume_file_name": "tailored_resume_-_wells_fargo.txt",
+      "resume_upload_path": "/home/zkralec/VSCode/mission-control/data/openclaw_apply_drafts/resume_uploads/jobapply-ui-7264d6b4-39c1-458a-bd85-78d81725664c-ab7fcbda-71a5-4c07-a53c-8ae7d1cc2aba-ba5e42f4-aff3-4e89-a2ef-45ddbca9424b-norm-000234-wells-fargo-senior-software-engineer.txt",
+      "resume_text_present": true
+    },
+    "answer_count": 3,
+    "cover_letter_present": true,
+    "capture_screenshots": true,
+    "max_screenshots": 8,
+    "inspect_only": false,
+    "browser": {
+      "run_on_host": true,
+      "attach_mode": false,
+      "skip_browser_start": false,
+      "allow_browser_start": true,
+      "gateway_url": "ws://127.0.0.1:18789",
+      "cdp_url": "http://127.0.0.1:18800",
+      "host_gateway_alias": null
+    },
+    "profile_mode": "resume_profile",
+    "lineage": {
+      "pipeline_id": "jobapply-ui-7264d6b4-39c1-458a-bd85-78d81725664c",
+      "task_id": "ab7fcbda-71a5-4c07-a53c-8ae7d1cc2aba",
+      "run_id": "ba5e42f4-aff3-4e89-a2ef-45ddbca9424b"
+    }
+  },
+  "result_summary": {
+    "recorded_at": "2026-04-01T15:33:24Z",
+    "draft_status": "not_started",
+    "source_status": "command_failed",
+    "awaiting_review": false,
+    "review_status": "blocked",
+    "submitted": false,
+    "failure_category": "navigation_failed",
+    "blocking_reason": "OpenClaw command exited with code 1.",
+    "fields_filled_count": 0,
+    "screenshots_count": 0,
+    "checkpoint_urls": [
+      "https://www.indeed.com/rc/clk?jk=438fdc5ed57d2861&bb=lsC0C-KA6bKR0vyL51UMPYNIConfObcNkpu-KDca0Q0bseF6w1rH38oe0_KGaRI6FbcGHAXQDhf9JI87KesPRjj1-lV4pEUklTvL526p4B_oe35lPR2Dd0CnpzV7RIay&xkcb=SoBG67M3lktNvjxM1p0AbzkdCdPP&fccid=78bbcd26e39621f5&vjs=3"
+    ],
+    "warnings": [
+      "configured_resume_upload_path_missing"
+    ],
+    "errors": [
+      "openclaw_command_failed_exit_1"
+    ]
+  }
+}
